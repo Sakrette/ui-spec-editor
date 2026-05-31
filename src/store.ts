@@ -46,7 +46,7 @@ export class EditorStore {
     ],
   };
 
-  public selectedId: string | null = "panel";
+  public selectedId: string | null = null;
 
   public constructor() {
     this.seedConstraintDrafts();
@@ -62,6 +62,10 @@ export class EditorStore {
 
   public select(id: string): void {
     this.selectedId = id;
+  }
+
+  public clearSelection(): void {
+    this.selectedId = null;
   }
 
   public resizeViewport(width: number, height: number): void {
@@ -91,6 +95,7 @@ export class EditorStore {
     this.spec.components[id] = component;
     this.spec.components.root.children.push(id);
     this.selectedId = id;
+    this.seedConstraintDrafts();
     this.solveLayout();
   }
 
@@ -113,9 +118,13 @@ export class EditorStore {
       }
     }
 
-    const next = this.components[0];
-    this.selectedId = next?.id ?? null;
+    this.selectedId = null;
     this.solveLayout();
+  }
+
+  public deleteComponent(componentId: string): void {
+    this.select(componentId);
+    this.deleteSelectedComponent();
   }
 
   public updateSelectedShape(shape: ShapeKind): void {
@@ -130,9 +139,12 @@ export class EditorStore {
     if (!this.selectedId) return;
     const component = this.spec.components[this.selectedId];
     if (!component || component.id === "root") return;
-    component.box[property] = property === "width" || property === "height" ? Math.max(1, Math.round(value)) : Math.round(value);
-    this.syncConstraintsFromBox(component.id);
-    this.solveLayout();
+    this.setComponentBox(component.id, {
+      x: property === "x" ? value : component.box.x,
+      y: property === "y" ? value : component.box.y,
+      width: property === "width" ? value : component.box.width,
+      height: property === "height" ? value : component.box.height,
+    });
   }
 
   public updateSelectedName(name: string): void {
@@ -150,11 +162,13 @@ export class EditorStore {
     sourceAnchor: SourceAnchor;
     value: number;
     unit: UnitKind;
+    locked?: boolean;
     ratioParts?: { w: number; h: number };
   }): void {
     const constraint: ConstraintSpec = {
       id: `constraint-${this.nextId++}`,
       ...input,
+      locked: input.locked ?? false,
     };
     this.spec.constraints.push(constraint);
     this.rememberConstraintDraft(constraint);
@@ -169,8 +183,13 @@ export class EditorStore {
     sourceAnchor: SourceAnchor;
     value: number;
     unit: UnitKind;
+    locked?: boolean;
     ratioParts?: { w: number; h: number };
   }): void {
+    if (wouldExceedDimensionalPair(this.spec.constraints, input.componentId, input.kind)) {
+      return;
+    }
+
     const existing = this.spec.constraints.find(
       (constraint) =>
         constraint.componentId === input.componentId &&
@@ -183,6 +202,7 @@ export class EditorStore {
       existing.sourceAnchor = input.sourceAnchor;
       existing.value = input.value;
       existing.unit = input.unit;
+      existing.locked = input.locked ?? existing.locked ?? false;
       existing.ratioParts = input.ratioParts;
       this.rememberConstraintDraft(existing);
       this.solveLayout();
@@ -220,9 +240,29 @@ export class EditorStore {
     return this.constraintDrafts.get(getConstraintKey(componentId, axis, kind)) ?? null;
   }
 
+  public updateConstraintLock(componentId: string, axis: AxisKind, kind: ConstraintKind, locked: boolean): void {
+    const active = this.spec.constraints.find(
+      (constraint) =>
+        constraint.componentId === componentId &&
+        constraint.axis === axis &&
+        constraint.kind === kind,
+    );
+    if (active) {
+      active.locked = locked;
+      this.rememberConstraintDraft(active);
+      this.solveLayout();
+      return;
+    }
+
+    const draft = this.getConstraintDraft(componentId, axis, kind);
+    if (!draft) return;
+    this.constraintDrafts.set(getConstraintKey(componentId, axis, kind), { ...draft, locked });
+  }
+
   public activateConstraint(componentId: string, axis: AxisKind, kind: ConstraintKind): void {
     const component = this.spec.components[componentId];
     if (!component || component.id === "root") return;
+    if (wouldExceedDimensionalPair(this.spec.constraints, componentId, kind)) return;
     const draft = this.getConstraintDraft(componentId, axis, kind) ?? this.createDefaultDraft(componentId, axis, kind);
     const measured = this.measureDraftConstraint({
       componentId: draft.componentId,
@@ -248,6 +288,7 @@ export class EditorStore {
     this.upsertConstraint({
       ...draft,
       value: measured !== null && Number.isFinite(measured) ? roundConstraintValue(measured, draft.unit) : draft.value,
+      locked: draft.locked,
       ratioParts,
     });
   }
@@ -272,6 +313,7 @@ export class EditorStore {
       sourceAnchor: input.sourceAnchor,
       value: 0,
       unit: input.unit,
+      locked: false,
       ratioParts: undefined,
     });
   }
@@ -280,9 +322,33 @@ export class EditorStore {
     if (!this.selectedId) return;
     const component = this.spec.components[this.selectedId];
     if (!component || component.id === "root") return;
-    component.box.x += dx;
-    component.box.y += dy;
+    this.setComponentBox(component.id, {
+      x: component.box.x + dx,
+      y: component.box.y + dy,
+      width: component.box.width,
+      height: component.box.height,
+    });
+  }
+
+  public setComponentBox(componentId: string, nextBox: { x: number; y: number; width: number; height: number }): void {
+    const component = this.spec.components[componentId];
+    if (!component || component.id === "root") return;
+    component.box.x = Math.round(nextBox.x);
+    component.box.y = Math.round(nextBox.y);
+    component.box.width = Math.max(1, Math.round(nextBox.width));
+    component.box.height = Math.max(1, Math.round(nextBox.height));
     this.syncConstraintsFromBox(component.id);
+    this.solveLayout();
+  }
+
+  public adjustConstraintValue(constraintId: string, deltaPixels: number, baseValue?: number): void {
+    const constraint = this.spec.constraints.find((item) => item.id === constraintId);
+    if (!constraint || constraint.locked || constraint.kind === "ratio") return;
+
+    const basis = this.getConstraintBasis(constraint);
+    const deltaValue = constraint.unit === "percent" ? (basis === 0 ? 0 : (deltaPixels / basis) * 100) : deltaPixels;
+    constraint.value = roundConstraintValue((baseValue ?? constraint.value) + deltaValue, constraint.unit);
+    this.rememberConstraintDraft(constraint);
     this.solveLayout();
   }
 
@@ -316,6 +382,10 @@ export class EditorStore {
     }
 
     if (axis === "x") {
+      const resolvedWidth = values.get("width") ?? values.get("ratio");
+      if (resolvedWidth !== undefined && Number.isFinite(resolvedWidth)) {
+        component.box.width = Math.max(1, Math.round(resolvedWidth));
+      }
       const solved = solveHorizontal(values);
       if (!solved) return;
       component.box.x = Math.round(solved.x ?? component.box.x);
@@ -323,6 +393,10 @@ export class EditorStore {
       return;
     }
 
+    const resolvedHeight = values.get("height") ?? values.get("ratio");
+    if (resolvedHeight !== undefined && Number.isFinite(resolvedHeight)) {
+      component.box.height = Math.max(1, Math.round(resolvedHeight));
+    }
     const solved = solveVertical(values);
     if (!solved) return;
     component.box.y = Math.round(solved.y ?? component.box.y);
@@ -398,13 +472,7 @@ export class EditorStore {
   }
 
   private resolveOffset(constraint: ConstraintSpec, axis: "x" | "y"): number {
-    const basis = constraint.sourceComponentId
-      ? axis === "x"
-        ? this.spec.components[constraint.sourceComponentId]?.box.width ?? this.spec.viewport.width
-        : this.spec.components[constraint.sourceComponentId]?.box.height ?? this.spec.viewport.height
-      : axis === "x"
-        ? this.spec.viewport.width
-        : this.spec.viewport.height;
+    const basis = this.getConstraintBasis(constraint, axis);
 
     if (constraint.unit === "percent") {
       return basis * (constraint.value / 100);
@@ -419,9 +487,16 @@ export class EditorStore {
 
     const constraints = this.spec.constraints.filter((constraint) => constraint.componentId === componentId);
     for (const constraint of constraints) {
+      if (constraint.locked) continue;
       const nextValue = this.measureConstraintValue(component, constraint);
       if (nextValue !== null && Number.isFinite(nextValue)) {
         constraint.value = roundConstraintValue(nextValue, constraint.unit);
+        if (constraint.kind === "ratio") {
+          constraint.ratioParts = {
+            w: Math.max(0, Math.round(component.box.width)),
+            h: Math.max(0, Math.round(component.box.height)),
+          };
+        }
         this.rememberConstraintDraft(constraint);
       }
     }
@@ -436,6 +511,7 @@ export class EditorStore {
       sourceAnchor: constraint.sourceAnchor,
       value: constraint.value,
       unit: constraint.unit,
+      locked: constraint.locked ?? false,
       ratioParts: constraint.ratioParts ? { ...constraint.ratioParts } : undefined,
     });
   }
@@ -462,6 +538,7 @@ export class EditorStore {
       sourceAnchor: getDefaultSourceAnchor(axis, kind),
       value: 0,
       unit: kind === "ratio" ? "ratio" : "px",
+      locked: false,
       ratioParts: kind === "ratio" ? { w: 1, h: 1 } : undefined,
     };
   }
@@ -525,13 +602,18 @@ export class EditorStore {
   }
 
   private getAxisBasis(constraint: ConstraintSpec): number {
+    return this.getConstraintBasis(constraint);
+  }
+
+  private getConstraintBasis(constraint: ConstraintSpec, forcedAxis?: "x" | "y"): number {
+    const axis = forcedAxis ?? constraint.axis;
     if (constraint.sourceComponentId) {
       const source = this.spec.components[constraint.sourceComponentId];
       if (source) {
-        return constraint.axis === "x" ? source.box.width : source.box.height;
+        return axis === "x" ? source.box.width : source.box.height;
       }
     }
-    return constraint.axis === "x" ? this.spec.viewport.width : this.spec.viewport.height;
+    return axis === "x" ? this.spec.viewport.width : this.spec.viewport.height;
   }
 
   public exportJson(): string {
@@ -556,7 +638,7 @@ export class EditorStore {
   public importJson(json: string): void {
     const parsed = JSON.parse(json) as ProjectSpec;
     this.spec = normalizeImportedSpec(parsed);
-    this.selectedId = this.components[0]?.id ?? null;
+    this.selectedId = null;
     this.constraintDrafts.clear();
     this.seedConstraintDrafts();
     for (const constraint of this.spec.constraints) {
@@ -565,6 +647,27 @@ export class EditorStore {
     this.nextId = computeNextId(this.spec);
     this.solveLayout();
   }
+}
+
+function wouldExceedDimensionalPair(
+  constraints: ConstraintSpec[],
+  componentId: string,
+  kind: ConstraintKind,
+): boolean {
+  if (!isDimensionalKind(kind)) return false;
+
+  const activeKinds = new Set(
+    constraints
+      .filter((constraint) => constraint.componentId === componentId && isDimensionalKind(constraint.kind))
+      .map((constraint) => constraint.kind),
+  );
+
+  if (activeKinds.has(kind)) return false;
+  return activeKinds.size >= 2;
+}
+
+function isDimensionalKind(kind: ConstraintKind): kind is "width" | "height" | "ratio" {
+  return kind === "width" || kind === "height" || kind === "ratio";
 }
 
 function solveHorizontal(values: Map<ConstraintKind, number>): { x?: number; width?: number } | null {
@@ -646,6 +749,7 @@ function normalizeImportedSpec(spec: ProjectSpec): ProjectSpec {
     constraints: spec.constraints.map((constraint) => ({
       ...constraint,
       unit: constraint.kind === "ratio" ? "ratio" : constraint.unit,
+      locked: Boolean(constraint.locked),
       ratioParts:
         constraint.kind === "ratio"
           ? constraint.ratioParts ??

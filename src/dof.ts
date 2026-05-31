@@ -46,6 +46,19 @@ export function getShapeLabel(shape: ShapeKind): string {
 function analyzeComponent(component: ComponentNode, constraints: ConstraintSpec[]): ComponentDofReport {
   const ownConstraints = constraints.filter((constraint) => constraint.componentId === component.id);
   const axes = [analyzeAxis("x", ownConstraints), analyzeAxis("y", ownConstraints)];
+  const dimensionalKinds = new Set(
+    ownConstraints
+      .filter((constraint) => isDimensionalKind(constraint.kind))
+      .map((constraint) => constraint.kind),
+  );
+
+  if (dimensionalKinds.size > 2) {
+    axes.forEach((axis) => {
+      axis.status = "over";
+      axis.reason = `width/height/ratio uses ${dimensionalKinds.size}/2`;
+    });
+  }
+
   const missingAxes = axes.filter((axis) => axis.status === "under").map((axis) => axis.axis);
   const overConstrainedAxes = axes.filter((axis) => axis.status === "over").map((axis) => axis.axis);
 
@@ -94,4 +107,8 @@ function summarizeStatus(axes: AxisConstraintStatus[]): DofStatus {
   if (axes.some((axis) => axis.status === "over")) return "over";
   if (axes.some((axis) => axis.status === "under")) return "under";
   return "full";
+}
+
+function isDimensionalKind(kind: ConstraintKind): kind is "width" | "height" | "ratio" {
+  return kind === "width" || kind === "height" || kind === "ratio";
 }

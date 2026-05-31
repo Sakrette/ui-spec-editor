@@ -33,6 +33,7 @@ export interface ConstraintSpec {
   sourceAnchor: SourceAnchor;
   value: number;
   unit: UnitKind;
+  locked?: boolean;
   ratioParts?: {
     w: number;
     h: number;
