@@ -141,7 +141,7 @@ type ControlHandle = "move" | "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
 type DragState =
   | { mode: "move"; id: string; pointerId: number; startClientX: number; startClientY: number; startBox: Box }
   | { mode: "resize"; id: string; pointerId: number; startClientX: number; startClientY: number; startBox: Box; handle: Exclude<ControlHandle, "move"> }
-  | { mode: "constraint"; constraintId: string; pointerId: number; startClientX: number; startClientY: number; axis: AxisKind; startValue: number };
+  | { mode: "constraint"; constraintId: string; pointerId: number; startClientX: number; startClientY: number; axis: AxisKind; startValue: number; valueScale: number };
 
 type Vec2 = { x: number; y: number };
 type LabelBox = { x: number; y: number; width: number; height: number };
@@ -155,6 +155,7 @@ const ANNOTATION_LINE_GAP = 3 * 1.5;
 
 let dragging: DragState | null = null;
 let expandedMethodKey: string | null = null;
+let hoveredControlKey: string | null = null;
 
 function render(): void {
   renderViewportControls();
@@ -277,6 +278,8 @@ function createResizeHandles(component: ComponentNode): SVGGElement {
 
   for (const { handle, x, y, cursor } of getResizeHandlePoints(component.box)) {
     if (isResizeHandleHidden(handle, xLocked, yLocked)) continue;
+    const key = getHandleControlKey(component.id, handle);
+    if (shouldHideOtherControls(key)) continue;
     const node = createControlHandle(component, handle, x, y, cursor);
     group.appendChild(node);
   }
@@ -374,8 +377,6 @@ function createHorizontalDimension(
   if (!target || !source) return group;
   if (Math.abs(source.x - target.x) < 0.5) {
     group.appendChild(createAnnotationGuideLine(source, target));
-    group.appendChild(createHitLine(source.x, source.y, target.x, target.y));
-    wireConstraintDrag(group, constraint, "x");
     return group;
   }
 
@@ -385,6 +386,8 @@ function createHorizontalDimension(
   const dimTarget = { x: target.x, y };
   group.appendChild(
     createStandardAnnotation({
+      constraint,
+      axis: "x",
       referenceA: source,
       referenceB: target,
       measureA: dimSource,
@@ -393,7 +396,6 @@ function createHorizontalDimension(
       labelBoxes,
     }),
   );
-  wireConstraintDrag(group, constraint, "x");
   return group;
 }
 
@@ -412,8 +414,6 @@ function createVerticalDimension(
   if (!target || !source) return group;
   if (Math.abs(source.y - target.y) < 0.5) {
     group.appendChild(createAnnotationGuideLine(source, target));
-    group.appendChild(createHitLine(source.x, source.y, target.x, target.y));
-    wireConstraintDrag(group, constraint, "y");
     return group;
   }
 
@@ -423,6 +423,8 @@ function createVerticalDimension(
   const dimTarget = { x, y: target.y };
   group.appendChild(
     createStandardAnnotation({
+      constraint,
+      axis: "y",
       referenceA: source,
       referenceB: target,
       measureA: dimSource,
@@ -431,7 +433,6 @@ function createVerticalDimension(
       labelBoxes,
     }),
   );
-  wireConstraintDrag(group, constraint, "y");
   return group;
 }
 
@@ -458,6 +459,8 @@ function createSizeDimension(
     const y = reserveHorizontalBand(horizontalBands, proposedY, left.x, right.x);
     group.appendChild(
       createStandardAnnotation({
+        constraint,
+        axis: "x",
         referenceA: left,
         referenceB: right,
         measureA: { x: left.x, y },
@@ -466,7 +469,6 @@ function createSizeDimension(
         labelBoxes,
       }),
     );
-    wireConstraintDrag(group, constraint, "x");
     return group;
   }
 
@@ -482,6 +484,8 @@ function createSizeDimension(
   const x = reserveVerticalBand(verticalBands, proposedX, top.y, bottom.y);
   group.appendChild(
     createStandardAnnotation({
+      constraint,
+      axis: "y",
       referenceA: top,
       referenceB: bottom,
       measureA: { x, y: top.y },
@@ -490,7 +494,6 @@ function createSizeDimension(
       labelBoxes,
     }),
   );
-  wireConstraintDrag(group, constraint, "y");
   return group;
 }
 
@@ -502,33 +505,6 @@ function createCenterCross(component: ComponentNode): SVGGElement {
   group.appendChild(createExtensionLine(cx - 8, cy, cx + 8, cy));
   group.appendChild(createExtensionLine(cx, cy - 8, cx, cy + 8));
   return group;
-}
-
-function wireConstraintDrag(group: SVGGElement, constraint: ConstraintSpec, axis: AxisKind): void {
-  if (constraint.locked) {
-    group.classList.add("is-locked");
-    group.setAttribute("data-preserve-selection", "true");
-    return;
-  }
-
-  group.classList.add("is-draggable");
-  group.setAttribute("data-preserve-selection", "true");
-  group.addEventListener("pointerdown", (event) => {
-    const pointerEvent = event as PointerEvent;
-    pointerEvent.stopPropagation();
-    store.select(constraint.componentId);
-    dragging = {
-      mode: "constraint",
-      constraintId: constraint.id,
-      pointerId: pointerEvent.pointerId,
-      startClientX: pointerEvent.clientX,
-      startClientY: pointerEvent.clientY,
-      axis,
-      startValue: constraint.value,
-    };
-    canvas.setPointerCapture(pointerEvent.pointerId);
-    render();
-  });
 }
 
 function createRatioOverlay(component: ComponentNode, ratioConstraint: ConstraintSpec | undefined, labelBoxes: LabelBox[]): SVGGElement {
@@ -551,6 +527,8 @@ function createRatioOverlay(component: ComponentNode, ratioConstraint: Constrain
 
   group.appendChild(
     createOneWayAnnotation({
+      constraint: ratioConstraint,
+      axis: "x",
       start: center,
       end: corner,
       label: formatRatioDisplayLabel(ratioConstraint, component.box.width, component.box.height),
@@ -577,16 +555,6 @@ function createDimensionLine(x1: number, y1: number, x2: number, y2: number): SV
   line.setAttribute("x2", String(x2));
   line.setAttribute("y2", String(y2));
   line.setAttribute("class", "dimension-line");
-  return line;
-}
-
-function createHitLine(x1: number, y1: number, x2: number, y2: number): SVGLineElement {
-  const line = createSvgElement("line");
-  line.setAttribute("x1", String(x1));
-  line.setAttribute("y1", String(y1));
-  line.setAttribute("x2", String(x2));
-  line.setAttribute("y2", String(y2));
-  line.setAttribute("class", "dimension-hit");
   return line;
 }
 
@@ -621,6 +589,8 @@ function createRatioLine(x1: number, y1: number, x2: number, y2: number): SVGLin
 }
 
 function createStandardAnnotation({
+  constraint,
+  axis,
   referenceA,
   referenceB,
   measureA,
@@ -628,6 +598,8 @@ function createStandardAnnotation({
   label,
   labelBoxes,
 }: {
+  constraint: ConstraintSpec;
+  axis: AxisKind;
   referenceA: Vec2;
   referenceB: Vec2;
   measureA: Vec2;
@@ -650,6 +622,7 @@ function createStandardAnnotation({
 
   const dir = normalize(subtract(end, start));
   const theta = rotateCcw(dir);
+  const targetTip = shouldSwapAnnotationEndpoints(measureA, measureB) ? start : end;
 
   const span = Math.abs(dot(subtract(end, start), dir));
   if (span < 0.5) {
@@ -687,16 +660,25 @@ function createStandardAnnotation({
 
   registerLabelBox(placement.box, labelBoxes);
   group.appendChild(createPlacedLabel(placement.center, dir, label));
-  group.appendChild(createHitLine(start.x, start.y, end.x, end.y));
+  for (const controlSpec of getConstraintControlSpecs(constraint, axis, start, end, dir, targetTip)) {
+    const control = createConstraintArrowControl(controlSpec.tip, controlSpec.direction, constraint, axis, false, controlSpec.valueScale);
+    if (control) {
+      group.appendChild(control);
+    }
+  }
   return group;
 }
 
 function createOneWayAnnotation({
+  constraint,
+  axis,
   start,
   end,
   label,
   labelBoxes,
 }: {
+  constraint: ConstraintSpec | undefined;
+  axis: AxisKind;
   start: Vec2;
   end: Vec2;
   label: string;
@@ -726,6 +708,12 @@ function createOneWayAnnotation({
   group.appendChild(createArrowWithTail(end, scale(dir, -1), true));
   registerLabelBox(placement.box, labelBoxes);
   group.appendChild(createRatioText(placement.center, dir, label));
+  if (constraint) {
+    const control = createConstraintArrowControl(end, scale(dir, -1), constraint, axis, true, 1);
+    if (control) {
+      group.appendChild(control);
+    }
+  }
   return group;
 }
 
@@ -870,11 +858,16 @@ function createEndBar(center: Vec2, theta: Vec2): SVGLineElement {
 }
 
 function createArrowTriangle(tip: Vec2, direction: Vec2): SVGPathElement {
+  return createArrowTriangleSized(tip, direction, ANNOTATION_ARROW_SIDE);
+}
+
+function createArrowTriangleSized(tip: Vec2, direction: Vec2, side: number): SVGPathElement {
   const dir = normalize(direction);
   const theta = rotateCcw(dir);
-  const baseCenter = add(tip, scale(dir, ANNOTATION_ARROW_LENGTH));
-  const left = add(baseCenter, scale(theta, ANNOTATION_ARROW_SIDE / 2));
-  const right = add(baseCenter, scale(theta, -ANNOTATION_ARROW_SIDE / 2));
+  const length = (side * Math.sqrt(3)) / 2;
+  const baseCenter = add(tip, scale(dir, length));
+  const left = add(baseCenter, scale(theta, side / 2));
+  const right = add(baseCenter, scale(theta, -side / 2));
   const path = createSvgElement("path");
   path.setAttribute("d", `M ${tip.x} ${tip.y} L ${left.x} ${left.y} L ${right.x} ${right.y} Z`);
   path.setAttribute("class", "dimension-arrow");
@@ -897,6 +890,59 @@ function createCrossMarker(center: Vec2): SVGGElement {
   group.appendChild(createRatioLine(center.x - half, center.y, center.x + half, center.y));
   group.appendChild(createRatioLine(center.x, center.y - half, center.x, center.y + half));
   return group;
+}
+
+function createConstraintArrowControl(
+  tip: Vec2,
+  direction: Vec2,
+  constraint: ConstraintSpec,
+  axis: AxisKind,
+  ratio = false,
+  valueScale = 1,
+): SVGPathElement | null {
+  const key = getConstraintControlKey(constraint.id);
+  if (shouldHideOtherControls(key)) return null;
+
+  const path = createArrowTriangleSized(tip, direction, ANNOTATION_UNIT * 0.75);
+  path.setAttribute(
+    "class",
+    [
+      "constraint-arrow-control",
+      ratio ? "is-ratio" : "",
+      isControlActive(key) ? "is-active" : "",
+    ]
+      .filter(Boolean)
+      .join(" "),
+  );
+  path.setAttribute("data-preserve-selection", "true");
+  path.setAttribute("data-control-key", key);
+
+  if (constraint.locked) {
+    path.classList.add("is-locked");
+    return path;
+  }
+
+  path.style.cursor = "grab";
+  path.addEventListener("pointerdown", (event) => {
+    const pointerEvent = event as PointerEvent;
+    pointerEvent.stopPropagation();
+    hoveredControlKey = key;
+    store.select(constraint.componentId);
+    dragging = {
+      mode: "constraint",
+      constraintId: constraint.id,
+      pointerId: pointerEvent.pointerId,
+      startClientX: pointerEvent.clientX,
+      startClientY: pointerEvent.clientY,
+      axis,
+      startValue: constraint.value,
+      valueScale,
+    };
+    canvas.setPointerCapture(pointerEvent.pointerId);
+    render();
+  });
+
+  return path;
 }
 
 function getTargetAnchorPoint(
@@ -1065,6 +1111,7 @@ function createControlHandle(
   y: number,
   cursor: string,
 ): SVGElement {
+  const key = getHandleControlKey(component.id, handle);
   const node = createSvgElement(handle === "move" ? "circle" : "rect");
   if (node instanceof SVGCircleElement) {
     node.setAttribute("cx", String(x));
@@ -1077,11 +1124,19 @@ function createControlHandle(
     node.setAttribute("height", "10");
     node.setAttribute("rx", "2");
   }
-  node.setAttribute("class", handle === "move" ? "move-handle" : "resize-handle");
+  node.setAttribute(
+    "class",
+    [handle === "move" ? "move-handle" : "resize-handle", isControlActive(key) ? "is-active" : ""]
+      .filter(Boolean)
+      .join(" "),
+  );
+  node.setAttribute("data-preserve-selection", "true");
+  node.setAttribute("data-control-key", key);
   node.style.cursor = cursor;
   node.addEventListener("pointerdown", (event) => {
     const pointerEvent = event as PointerEvent;
     pointerEvent.stopPropagation();
+    hoveredControlKey = key;
     store.select(component.id);
     dragging =
       handle === "move"
@@ -1161,6 +1216,82 @@ function getOuterSizeAnchorPoint(
 
 function estimateLabelWidth(text: string): number {
   return Math.max(24, text.length * 6);
+}
+
+function getHandleControlKey(componentId: string, handle: ControlHandle): string {
+  return `handle:${componentId}:${handle}`;
+}
+
+function getConstraintControlKey(constraintId: string): string {
+  return `constraint:${constraintId}`;
+}
+
+function getDraggingControlKey(): string | null {
+  if (!dragging) return null;
+  if (dragging.mode === "move") return getHandleControlKey(dragging.id, "move");
+  if (dragging.mode === "resize") return getHandleControlKey(dragging.id, dragging.handle);
+  return getConstraintControlKey(dragging.constraintId);
+}
+
+function getActiveControlKey(): string | null {
+  return getDraggingControlKey() ?? hoveredControlKey;
+}
+
+function shouldHideOtherControls(controlKey: string): boolean {
+  const activeKey = getActiveControlKey();
+  return activeKey !== null && activeKey !== controlKey;
+}
+
+function isControlActive(controlKey: string): boolean {
+  return getActiveControlKey() === controlKey;
+}
+
+function getConstraintControlSpecs(
+  constraint: ConstraintSpec,
+  axis: AxisKind,
+  start: Vec2,
+  end: Vec2,
+  dir: Vec2,
+  targetTip: Vec2,
+): Array<{ tip: Vec2; direction: Vec2; valueScale: number }> {
+  if (constraint.kind === "width") {
+    const kinds = store.spec.constraints
+      .filter(
+        (item) => item.componentId === constraint.componentId && item.axis === axis && item.kind !== "width" && item.id !== constraint.id,
+      )
+      .map((item) => item.kind);
+    const leftConstrained = kinds.includes("left");
+    const rightConstrained = kinds.includes("right");
+    const controls: Array<{ tip: Vec2; direction: Vec2; valueScale: number }> = [];
+    if (!leftConstrained) {
+      controls.push({ tip: start, direction: dir, valueScale: -1 });
+    }
+    if (!rightConstrained) {
+      controls.push({ tip: end, direction: scale(dir, -1), valueScale: 1 });
+    }
+    return controls;
+  }
+
+  if (constraint.kind === "height") {
+    const kinds = store.spec.constraints
+      .filter(
+        (item) => item.componentId === constraint.componentId && item.axis === axis && item.kind !== "height" && item.id !== constraint.id,
+      )
+      .map((item) => item.kind);
+    const bottomConstrained = kinds.includes("bottom");
+    const topConstrained = kinds.includes("top");
+    const controls: Array<{ tip: Vec2; direction: Vec2; valueScale: number }> = [];
+    if (!bottomConstrained) {
+      controls.push({ tip: start, direction: dir, valueScale: 1 });
+    }
+    if (!topConstrained) {
+      controls.push({ tip: end, direction: scale(dir, -1), valueScale: -1 });
+    }
+    return controls;
+  }
+
+  const direction = targetTip === end ? scale(dir, -1) : dir;
+  return [{ tip: targetTip, direction, valueScale: 1 }];
 }
 
 function add(a: Vec2, b: Vec2): Vec2 {
@@ -1830,7 +1961,15 @@ viewportHeightInput.addEventListener("input", () => {
 });
 
 canvas.addEventListener("pointermove", (event) => {
-  if (!dragging) return;
+  if (!dragging) {
+    const target = event.target as Element | null;
+    const nextHover = target?.closest<HTMLElement>("[data-control-key]")?.dataset.controlKey ?? null;
+    if (hoveredControlKey !== nextHover) {
+      hoveredControlKey = nextHover;
+      render();
+    }
+    return;
+  }
   const { dx, dy } = getCanvasDelta(
     event.clientX - dragging.startClientX,
     event.clientY - dragging.startClientY,
@@ -1846,7 +1985,8 @@ canvas.addEventListener("pointermove", (event) => {
   } else if (dragging.mode === "resize") {
     store.setComponentBox(dragging.id, getResizedBox(dragging.startBox, dragging.handle, dx, dy));
   } else {
-    store.adjustConstraintValue(dragging.constraintId, dragging.axis === "x" ? dx : dy, dragging.startValue);
+    const delta = (dragging.axis === "x" ? dx : dy) * dragging.valueScale;
+    store.adjustConstraintValue(dragging.constraintId, delta, dragging.startValue);
   }
   render();
 });
@@ -1856,6 +1996,7 @@ canvas.addEventListener("pointerdown", (event) => {
   if (target?.closest("[data-preserve-selection='true']")) return;
   if (store.selectedId === null && expandedMethodKey === null) return;
   dragging = null;
+  hoveredControlKey = null;
   store.clearSelection();
   expandedMethodKey = null;
   render();
@@ -1867,6 +2008,7 @@ sidebar.addEventListener("pointerdown", (event) => {
   if (target.closest(".component-row-main")) return;
   if (store.selectedId === null && expandedMethodKey === null) return;
   dragging = null;
+  hoveredControlKey = null;
   store.clearSelection();
   expandedMethodKey = null;
   render();
@@ -1875,12 +2017,21 @@ sidebar.addEventListener("pointerdown", (event) => {
 canvas.addEventListener("pointerup", (event) => {
   if (dragging && dragging.pointerId === event.pointerId) {
     dragging = null;
+    hoveredControlKey = null;
+    render();
   }
 });
 
 canvas.addEventListener("pointerleave", (event) => {
   if (dragging && dragging.pointerId === event.pointerId) {
     dragging = null;
+    hoveredControlKey = null;
+    render();
+    return;
+  }
+  if (hoveredControlKey !== null) {
+    hoveredControlKey = null;
+    render();
   }
 });
 

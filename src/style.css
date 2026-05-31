@@ -624,16 +624,27 @@ button:hover {
   user-select: none;
 }
 
-.constraint-overlay .is-draggable {
-  cursor: grab;
-}
-
-.constraint-overlay .is-draggable:active {
-  cursor: grabbing;
-}
-
 .constraint-overlay .is-locked {
   opacity: 0.7;
+}
+
+.constraint-arrow-control {
+  fill: transparent;
+  stroke: transparent;
+  stroke-width: 10;
+  vector-effect: non-scaling-stroke;
+  pointer-events: all;
+}
+
+.constraint-arrow-control.is-active {
+  fill: rgb(14 165 233 / 0.55);
+  stroke: #0284c7;
+  stroke-width: 1.25;
+}
+
+.constraint-arrow-control.is-ratio.is-active {
+  fill: rgb(124 58 237 / 0.45);
+  stroke: #7c3aed;
 }
 
 .component {
@@ -665,11 +676,21 @@ button:hover {
   vector-effect: non-scaling-stroke;
 }
 
+.resize-handle.is-active {
+  fill: #2563eb;
+  stroke: #1d4ed8;
+}
+
 .move-handle {
   fill: #dbeafe;
   stroke: #2563eb;
   stroke-width: 1.5;
   vector-effect: non-scaling-stroke;
+}
+
+.move-handle.is-active {
+  fill: #2563eb;
+  stroke: #1d4ed8;
 }
 
 textarea {
