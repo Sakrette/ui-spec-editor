@@ -2190,6 +2190,10 @@ async function exportCanvasToPng(svg: SVGSVGElement): Promise<Blob> {
   const serializer = new XMLSerializer();
   const clone = svg.cloneNode(true) as SVGSVGElement;
   clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  clone.setAttribute("width", String(svg.viewBox.baseVal.width));
+  clone.setAttribute("height", String(svg.viewBox.baseVal.height));
+  inlineSvgComputedStyles(svg, clone);
+  clone.insertBefore(createEmbeddedSvgStyle(), clone.firstChild);
   const svgString = serializer.serializeToString(clone);
   const svgBlob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
   const url = URL.createObjectURL(svgBlob);
@@ -2220,6 +2224,66 @@ async function exportCanvasToPng(svg: SVGSVGElement): Promise<Blob> {
       if (blob) resolve(blob);
       else reject(new Error("PNG export failed"));
     }, "image/png");
+  });
+}
+
+function createEmbeddedSvgStyle(): SVGStyleElement {
+  const style = createSvgElement("style");
+  style.textContent = collectEmbeddedStyleText();
+  return style;
+}
+
+function collectEmbeddedStyleText(): string {
+  const chunks: string[] = [];
+  for (const sheet of Array.from(document.styleSheets)) {
+    try {
+      const rules = sheet.cssRules;
+      for (const rule of Array.from(rules)) {
+        chunks.push(rule.cssText);
+      }
+    } catch {
+      // Ignore stylesheets that cannot be read; only same-origin local styles are needed here.
+    }
+  }
+  return chunks.join("\n");
+}
+
+function inlineSvgComputedStyles(sourceRoot: SVGSVGElement, cloneRoot: SVGSVGElement): void {
+  const sourceNodes = [sourceRoot, ...Array.from(sourceRoot.querySelectorAll<SVGElement>("*"))];
+  const cloneNodes = [cloneRoot, ...Array.from(cloneRoot.querySelectorAll<SVGElement>("*"))];
+  const properties = [
+    "fill",
+    "fill-opacity",
+    "stroke",
+    "stroke-opacity",
+    "stroke-width",
+    "stroke-dasharray",
+    "stroke-linecap",
+    "stroke-linejoin",
+    "opacity",
+    "font",
+    "font-family",
+    "font-size",
+    "font-weight",
+    "letter-spacing",
+    "text-anchor",
+    "dominant-baseline",
+    "paint-order",
+    "vector-effect",
+    "visibility",
+    "display",
+  ];
+
+  sourceNodes.forEach((sourceNode, index) => {
+    const cloneNode = cloneNodes[index];
+    if (!cloneNode) return;
+    const computed = getComputedStyle(sourceNode);
+    const styleText = properties
+      .map((property) => `${property}:${computed.getPropertyValue(property)};`)
+      .join("");
+    if (styleText) {
+      cloneNode.setAttribute("style", styleText);
+    }
   });
 }
 
