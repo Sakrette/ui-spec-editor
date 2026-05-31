@@ -551,11 +551,18 @@ button:hover {
   pointer-events: stroke;
 }
 
+.annotation-guide,
 .center-guide,
 .handle-outline {
   fill: none;
   vector-effect: non-scaling-stroke;
   pointer-events: none;
+}
+
+.annotation-guide {
+  stroke: #0f766e;
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
 }
 
 .center-guide {

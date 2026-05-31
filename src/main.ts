@@ -143,6 +143,16 @@ type DragState =
   | { mode: "resize"; id: string; pointerId: number; startClientX: number; startClientY: number; startBox: Box; handle: Exclude<ControlHandle, "move"> }
   | { mode: "constraint"; constraintId: string; pointerId: number; startClientX: number; startClientY: number; axis: AxisKind; startValue: number };
 
+type Vec2 = { x: number; y: number };
+type LabelBox = { x: number; y: number; width: number; height: number };
+
+const ANNOTATION_FONT_SIZE = 12;
+const ANNOTATION_UNIT = ANNOTATION_FONT_SIZE;
+const ANNOTATION_ARROW_SIDE = ANNOTATION_UNIT * 0.5;
+const ANNOTATION_ARROW_LENGTH = (ANNOTATION_ARROW_SIDE * Math.sqrt(3)) / 2;
+const ANNOTATION_LABEL_CENTER_OFFSET = ANNOTATION_UNIT * 0.75;
+const ANNOTATION_LINE_GAP = 3 * 1.5;
+
 let dragging: DragState | null = null;
 let expandedMethodKey: string | null = null;
 
@@ -170,6 +180,7 @@ function renderCanvas(): void {
   const analysis = analyzeProjectDof(store.spec);
   const horizontalBands: Array<{ y: number; start: number; end: number }> = [];
   const verticalBands: Array<{ x: number; start: number; end: number }> = [];
+  const labelBoxes: LabelBox[] = [];
   canvas.innerHTML = "";
 
   const background = createSvgElement("rect");
@@ -187,7 +198,7 @@ function renderCanvas(): void {
   }
 
   for (const component of store.components) {
-    canvas.appendChild(createConstraintOverlay(component, horizontalBands, verticalBands));
+    canvas.appendChild(createConstraintOverlay(component, horizontalBands, verticalBands, labelBoxes));
   }
 
   const selected = store.selectedId ? store.spec.components[store.selectedId] : null;
@@ -296,6 +307,7 @@ function createConstraintOverlay(
   component: ComponentNode,
   horizontalBands: Array<{ y: number; start: number; end: number }>,
   verticalBands: Array<{ x: number; start: number; end: number }>,
+  labelBoxes: LabelBox[],
 ): SVGGElement {
   const overlay = createSvgElement("g");
   overlay.setAttribute("class", "constraint-overlay");
@@ -323,25 +335,25 @@ function createConstraintOverlay(
   const ratioConstraint = constraints.find((constraint) => constraint.kind === "ratio");
 
   xPositionals.forEach((constraint, index) => {
-    overlay.appendChild(createHorizontalDimension(component, constraint, index, horizontalBands));
+    overlay.appendChild(createHorizontalDimension(component, constraint, index, horizontalBands, labelBoxes));
   });
 
   yPositionals.forEach((constraint, index) => {
-    overlay.appendChild(createVerticalDimension(component, constraint, index, verticalBands));
+    overlay.appendChild(createVerticalDimension(component, constraint, index, verticalBands, labelBoxes));
   });
 
   const widthConstraint = constraints.find((constraint) => constraint.axis === "x" && constraint.kind === "width");
   if (widthConstraint) {
-    overlay.appendChild(createSizeDimension(component, widthConstraint, "x", horizontalBands, verticalBands));
+    overlay.appendChild(createSizeDimension(component, widthConstraint, "x", horizontalBands, verticalBands, labelBoxes));
   }
 
   const heightConstraint = constraints.find((constraint) => constraint.axis === "y" && constraint.kind === "height");
   if (heightConstraint) {
-    overlay.appendChild(createSizeDimension(component, heightConstraint, "y", horizontalBands, verticalBands));
+    overlay.appendChild(createSizeDimension(component, heightConstraint, "y", horizontalBands, verticalBands, labelBoxes));
   }
 
   if (ratioConstraint) {
-    overlay.appendChild(createRatioOverlay(component, ratioConstraint));
+    overlay.appendChild(createRatioOverlay(component, ratioConstraint, labelBoxes));
   }
 
   return overlay;
@@ -352,6 +364,7 @@ function createHorizontalDimension(
   constraint: ConstraintSpec,
   index: number,
   horizontalBands: Array<{ y: number; start: number; end: number }>,
+  labelBoxes: LabelBox[],
 ): SVGGElement {
   const group = createSvgElement("g");
   const initialTarget = getTargetAnchorPoint(component, constraint);
@@ -360,12 +373,7 @@ function createHorizontalDimension(
   const target = getTargetAnchorPoint(component, constraint, source?.y);
   if (!target || !source) return group;
   if (Math.abs(source.x - target.x) < 0.5) {
-    group.appendChild(createAlignmentLine(source.x, source.y, target.x, target.y));
-    if (constraint.sourceAnchor === "centerX") {
-      const centerX = component.box.x + component.box.width / 2;
-      const centerY = component.box.y + component.box.height / 2;
-      group.appendChild(createCenterGuide(centerX, centerY, centerX, target.y));
-    }
+    group.appendChild(createAnnotationGuideLine(source, target));
     group.appendChild(createHitLine(source.x, source.y, target.x, target.y));
     wireConstraintDrag(group, constraint, "x");
     return group;
@@ -373,14 +381,18 @@ function createHorizontalDimension(
 
   const proposedY = Math.min(source.y, target.y) - 22 - index * 20;
   const y = reserveHorizontalBand(horizontalBands, proposedY, source.x, target.x);
-  group.appendChild(createExtensionLine(source.x, source.y, source.x, y));
-  group.appendChild(createExtensionLine(target.x, target.y, target.x, y));
-  if (constraint.sourceAnchor === "centerX") {
-    const centerX = component.box.x + component.box.width / 2;
-    const centerY = component.box.y + component.box.height / 2;
-    group.appendChild(createCenterGuide(centerX, centerY, centerX, y));
-  }
-  group.appendChild(createHorizontalMeasuredLine(source.x, target.x, y, formatConstraintLabel(constraint)));
+  const dimSource = { x: source.x, y };
+  const dimTarget = { x: target.x, y };
+  group.appendChild(
+    createStandardAnnotation({
+      referenceA: source,
+      referenceB: target,
+      measureA: dimSource,
+      measureB: dimTarget,
+      label: formatConstraintLabel(constraint),
+      labelBoxes,
+    }),
+  );
   wireConstraintDrag(group, constraint, "x");
   return group;
 }
@@ -390,6 +402,7 @@ function createVerticalDimension(
   constraint: ConstraintSpec,
   index: number,
   verticalBands: Array<{ x: number; start: number; end: number }>,
+  labelBoxes: LabelBox[],
 ): SVGGElement {
   const group = createSvgElement("g");
   const initialTarget = getTargetAnchorPoint(component, constraint);
@@ -398,12 +411,7 @@ function createVerticalDimension(
   const target = getTargetAnchorPoint(component, constraint, source?.x);
   if (!target || !source) return group;
   if (Math.abs(source.y - target.y) < 0.5) {
-    group.appendChild(createAlignmentLine(source.x, source.y, target.x, target.y));
-    if (constraint.sourceAnchor === "centerY") {
-      const centerX = component.box.x + component.box.width / 2;
-      const centerY = component.box.y + component.box.height / 2;
-      group.appendChild(createCenterGuide(centerX, centerY, target.x, centerY));
-    }
+    group.appendChild(createAnnotationGuideLine(source, target));
     group.appendChild(createHitLine(source.x, source.y, target.x, target.y));
     wireConstraintDrag(group, constraint, "y");
     return group;
@@ -411,14 +419,18 @@ function createVerticalDimension(
 
   const proposedX = Math.min(source.x, target.x) - 22 - index * 20;
   const x = reserveVerticalBand(verticalBands, proposedX, source.y, target.y);
-  group.appendChild(createExtensionLine(source.x, source.y, x, source.y));
-  group.appendChild(createExtensionLine(target.x, target.y, x, target.y));
-  if (constraint.sourceAnchor === "centerY") {
-    const centerX = component.box.x + component.box.width / 2;
-    const centerY = component.box.y + component.box.height / 2;
-    group.appendChild(createCenterGuide(centerX, centerY, x, centerY));
-  }
-  group.appendChild(createVerticalMeasuredLine(x, source.y, target.y, formatConstraintLabel(constraint)));
+  const dimSource = { x, y: source.y };
+  const dimTarget = { x, y: target.y };
+  group.appendChild(
+    createStandardAnnotation({
+      referenceA: source,
+      referenceB: target,
+      measureA: dimSource,
+      measureB: dimTarget,
+      label: formatConstraintLabel(constraint),
+      labelBoxes,
+    }),
+  );
   wireConstraintDrag(group, constraint, "y");
   return group;
 }
@@ -429,6 +441,7 @@ function createSizeDimension(
   axis: AxisKind,
   horizontalBands: Array<{ y: number; start: number; end: number }>,
   verticalBands: Array<{ x: number; start: number; end: number }>,
+  labelBoxes: LabelBox[],
 ): SVGGElement {
   const group = createSvgElement("g");
 
@@ -438,14 +451,21 @@ function createSizeDimension(
     if (component.shape === "ellipse") {
       const leftTangent = getSizeAnchorPoint(component, "left", "x");
       const rightTangent = getSizeAnchorPoint(component, "right", "x");
-      group.appendChild(createExtensionLine(leftTangent.x, leftTangent.y, left.x, left.y));
-      group.appendChild(createExtensionLine(rightTangent.x, rightTangent.y, right.x, right.y));
+      group.appendChild(createDashedExtension(leftTangent, left));
+      group.appendChild(createDashedExtension(rightTangent, right));
     }
     const proposedY = Math.max(left.y, right.y) + 24;
     const y = reserveHorizontalBand(horizontalBands, proposedY, left.x, right.x);
-    group.appendChild(createExtensionLine(left.x, left.y, left.x, y));
-    group.appendChild(createExtensionLine(right.x, right.y, right.x, y));
-    group.appendChild(createHorizontalMeasuredLine(left.x, right.x, y, formatConstraintLabel(constraint)));
+    group.appendChild(
+      createStandardAnnotation({
+        referenceA: left,
+        referenceB: right,
+        measureA: { x: left.x, y },
+        measureB: { x: right.x, y },
+        label: formatConstraintLabel(constraint),
+        labelBoxes,
+      }),
+    );
     wireConstraintDrag(group, constraint, "x");
     return group;
   }
@@ -455,14 +475,21 @@ function createSizeDimension(
   if (component.shape === "ellipse") {
     const topTangent = getSizeAnchorPoint(component, "top", "y");
     const bottomTangent = getSizeAnchorPoint(component, "bottom", "y");
-    group.appendChild(createExtensionLine(topTangent.x, topTangent.y, top.x, top.y));
-    group.appendChild(createExtensionLine(bottomTangent.x, bottomTangent.y, bottom.x, bottom.y));
+    group.appendChild(createDashedExtension(topTangent, top));
+    group.appendChild(createDashedExtension(bottomTangent, bottom));
   }
   const proposedX = Math.max(top.x, bottom.x) + 24;
   const x = reserveVerticalBand(verticalBands, proposedX, top.y, bottom.y);
-  group.appendChild(createExtensionLine(top.x, top.y, x, top.y));
-  group.appendChild(createExtensionLine(bottom.x, bottom.y, x, bottom.y));
-  group.appendChild(createVerticalMeasuredLine(x, top.y, bottom.y, formatConstraintLabel(constraint)));
+  group.appendChild(
+    createStandardAnnotation({
+      referenceA: top,
+      referenceB: bottom,
+      measureA: { x, y: top.y },
+      measureB: { x, y: bottom.y },
+      label: formatConstraintLabel(constraint),
+      labelBoxes,
+    }),
+  );
   wireConstraintDrag(group, constraint, "y");
   return group;
 }
@@ -504,7 +531,7 @@ function wireConstraintDrag(group: SVGGElement, constraint: ConstraintSpec, axis
   });
 }
 
-function createRatioOverlay(component: ComponentNode, ratioConstraint?: ConstraintSpec): SVGGElement {
+function createRatioOverlay(component: ComponentNode, ratioConstraint: ConstraintSpec | undefined, labelBoxes: LabelBox[]): SVGGElement {
   const group = createSvgElement("g");
   const center = {
     x: component.box.x + component.box.width / 2,
@@ -522,15 +549,13 @@ function createRatioOverlay(component: ComponentNode, ratioConstraint?: Constrai
     group.appendChild(createRatioGuide(top.x, top.y, corner.x, corner.y));
   }
 
-  group.appendChild(createRatioLine(center.x, center.y, corner.x, corner.y));
   group.appendChild(
-    createRatioLabel(
-      center.x,
-      center.y,
-      corner.x,
-      corner.y,
-      formatRatioDisplayLabel(ratioConstraint, component.box.width, component.box.height),
-    ),
+    createOneWayAnnotation({
+      start: center,
+      end: corner,
+      label: formatRatioDisplayLabel(ratioConstraint, component.box.width, component.box.height),
+      labelBoxes,
+    }),
   );
   return group;
 }
@@ -565,22 +590,12 @@ function createHitLine(x1: number, y1: number, x2: number, y2: number): SVGLineE
   return line;
 }
 
-function createCenterGuide(x1: number, y1: number, x2: number, y2: number): SVGLineElement {
+function createAnnotationGuideLine(start: Vec2, end: Vec2): SVGLineElement {
   const line = createSvgElement("line");
-  line.setAttribute("x1", String(x1));
-  line.setAttribute("y1", String(y1));
-  line.setAttribute("x2", String(x2));
-  line.setAttribute("y2", String(y2));
-  line.setAttribute("class", "center-guide");
-  return line;
-}
-
-function createAlignmentLine(x1: number, y1: number, x2: number, y2: number): SVGLineElement {
-  const line = createSvgElement("line");
-  line.setAttribute("x1", String(x1));
-  line.setAttribute("y1", String(y1));
-  line.setAttribute("x2", String(x2));
-  line.setAttribute("y2", String(y2));
+  line.setAttribute("x1", String(start.x));
+  line.setAttribute("y1", String(start.y));
+  line.setAttribute("x2", String(end.x));
+  line.setAttribute("y2", String(end.y));
   line.setAttribute("class", "alignment-line");
   return line;
 }
@@ -605,36 +620,283 @@ function createRatioLine(x1: number, y1: number, x2: number, y2: number): SVGLin
   return line;
 }
 
-function createRatioLabel(x1: number, y1: number, x2: number, y2: number, text: string): SVGTextElement {
-  const mx = (x1 + x2) / 2;
-  const my = (y1 + y2) / 2;
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
-  const length = Math.hypot(dx, dy) || 1;
-  const nx = (-dy / length) * 10;
-  const ny = (dx / length) * 10;
+function createStandardAnnotation({
+  referenceA,
+  referenceB,
+  measureA,
+  measureB,
+  label,
+  labelBoxes,
+}: {
+  referenceA: Vec2;
+  referenceB: Vec2;
+  measureA: Vec2;
+  measureB: Vec2;
+  label: string;
+  labelBoxes: LabelBox[];
+}): SVGGElement {
+  const group = createSvgElement("g");
+  let start = measureA;
+  let end = measureB;
+  let refStart = referenceA;
+  let refEnd = referenceB;
+
+  if (shouldSwapAnnotationEndpoints(start, end)) {
+    start = measureB;
+    end = measureA;
+    refStart = referenceB;
+    refEnd = referenceA;
+  }
+
+  const dir = normalize(subtract(end, start));
+  const theta = rotateCcw(dir);
+
+  const span = Math.abs(dot(subtract(end, start), dir));
+  if (span < 0.5) {
+    group.appendChild(createAnnotationGuideLine(referenceA, referenceB));
+    return group;
+  }
+
+  group.appendChild(createDashedExtension(refStart, start));
+  group.appendChild(createDashedExtension(refEnd, end));
+  group.appendChild(createEndBar(start, theta));
+  group.appendChild(createEndBar(end, theta));
+
+  const labelWidth = estimateLabelWidth(label);
+  const innerThreshold = labelWidth + ANNOTATION_UNIT * 1.5;
+  const preferOutside = span < innerThreshold;
+  const innerPlacement = createInnerLabelPlacement(start, end, dir, theta, labelWidth);
+  const outerPlacement = chooseOuterLabelPlacement(start, end, dir, theta, labelWidth);
+  const useOuter = preferOutside || collidesWithLabels(innerPlacement.box, labelBoxes);
+  const placement = useOuter ? outerPlacement : innerPlacement;
+
+  if (useOuter) {
+    const labelSide = placement.side === "positive" ? end : start;
+    const sideSign = placement.side === "positive" ? 1 : -1;
+    const textExtent = labelWidth + ANNOTATION_UNIT + ANNOTATION_UNIT * 0.5;
+    const extensionEnd = add(labelSide, scale(dir, sideSign * textExtent));
+    group.appendChild(createDimensionLine(start.x, start.y, end.x, end.y));
+    group.appendChild(createDimensionLine(labelSide.x, labelSide.y, extensionEnd.x, extensionEnd.y));
+    group.appendChild(createArrowWithTail(start, scale(dir, -1), false));
+    group.appendChild(createArrowWithTail(end, dir, false));
+  } else {
+    group.appendChild(createDimensionLine(start.x, start.y, end.x, end.y));
+    group.appendChild(createArrowTriangle(start, dir));
+    group.appendChild(createArrowTriangle(end, scale(dir, -1)));
+  }
+
+  registerLabelBox(placement.box, labelBoxes);
+  group.appendChild(createPlacedLabel(placement.center, dir, label));
+  group.appendChild(createHitLine(start.x, start.y, end.x, end.y));
+  return group;
+}
+
+function createOneWayAnnotation({
+  start,
+  end,
+  label,
+  labelBoxes,
+}: {
+  start: Vec2;
+  end: Vec2;
+  label: string;
+  labelBoxes: LabelBox[];
+}): SVGGElement {
+  const group = createSvgElement("g");
+  const dir = canonicalizeAnnotationDirection(subtract(end, start));
+  const theta = rotateCcw(dir);
+  const distance = length(subtract(end, start));
+  if (distance < 0.5) return group;
+
+  const labelWidth = estimateLabelWidth(label);
+  const innerThreshold = labelWidth + ANNOTATION_UNIT * 1.5;
+  const innerPlacement = createInnerLabelPlacement(start, end, dir, theta, labelWidth);
+  const outerPlacement = createOuterRatioPlacement(end, dir, theta, labelWidth);
+  const useOuter = distance < innerThreshold || collidesWithLabels(innerPlacement.box, labelBoxes);
+  const placement = useOuter ? outerPlacement : innerPlacement;
+
+  if (useOuter) {
+    const extensionEnd = add(end, scale(dir, labelWidth + ANNOTATION_UNIT));
+    group.appendChild(createRatioLine(start.x, start.y, extensionEnd.x, extensionEnd.y));
+  } else {
+    group.appendChild(createRatioLine(start.x, start.y, end.x, end.y));
+  }
+
+  group.appendChild(createCrossMarker(start));
+  group.appendChild(createArrowWithTail(end, scale(dir, -1), true));
+  registerLabelBox(placement.box, labelBoxes);
+  group.appendChild(createRatioText(placement.center, dir, label));
+  return group;
+}
+
+function createInnerLabelPlacement(start: Vec2, end: Vec2, dir: Vec2, theta: Vec2, labelWidth: number): {
+  center: Vec2;
+  box: LabelBox;
+  side: "positive";
+} {
+  const center = add(midpoint(start, end), scale(theta, ANNOTATION_LABEL_CENTER_OFFSET));
+  return {
+    center,
+    box: getCenteredRotatedLabelBox(center, dir, labelWidth, ANNOTATION_FONT_SIZE),
+    side: "positive",
+  };
+}
+
+function createOuterRatioPlacement(end: Vec2, dir: Vec2, theta: Vec2, labelWidth: number): {
+  center: Vec2;
+  box: LabelBox;
+  side: "positive";
+} {
+  const center = add(
+    end,
+    add(
+      scale(dir, ANNOTATION_UNIT + labelWidth / 2),
+      scale(theta, ANNOTATION_LABEL_CENTER_OFFSET),
+    ),
+  );
+  return {
+    center,
+    box: getCenteredRotatedLabelBox(center, dir, labelWidth, ANNOTATION_FONT_SIZE),
+    side: "positive",
+  };
+}
+
+function chooseOuterLabelPlacement(start: Vec2, end: Vec2, dir: Vec2, theta: Vec2, labelWidth: number): {
+  center: Vec2;
+  box: LabelBox;
+  side: "positive" | "negative";
+} {
+  const positive = getOuterLabelPlacement(end, dir, theta, labelWidth, "positive");
+  const negative = getOuterLabelPlacement(start, scale(dir, -1), theta, labelWidth, "negative");
+  const positiveScore = scoreLabelPlacement(positive.box);
+  const negativeScore = scoreLabelPlacement(negative.box);
+  return positiveScore <= negativeScore ? positive : negative;
+}
+
+function getOuterLabelPlacement(anchor: Vec2, outward: Vec2, theta: Vec2, labelWidth: number, side: "positive" | "negative"): {
+  center: Vec2;
+  box: LabelBox;
+  side: "positive" | "negative";
+} {
+  const center = add(
+    anchor,
+    add(
+      scale(normalize(outward), ANNOTATION_UNIT + labelWidth / 2),
+      scale(theta, ANNOTATION_LABEL_CENTER_OFFSET),
+    ),
+  );
+  return {
+    center,
+    box: getCenteredRotatedLabelBox(center, normalize(outward), labelWidth, ANNOTATION_FONT_SIZE),
+    side,
+  };
+}
+
+function scoreLabelPlacement(box: LabelBox): number {
+  let score = 0;
+  if (box.x < 0) score += 1000 + Math.abs(box.x);
+  if (box.y < 0) score += 1000 + Math.abs(box.y);
+  if (box.x + box.width > store.spec.viewport.width) score += 1000 + (box.x + box.width - store.spec.viewport.width);
+  if (box.y + box.height > store.spec.viewport.height) score += 1000 + (box.y + box.height - store.spec.viewport.height);
+  return score;
+}
+
+function collidesWithLabels(candidate: LabelBox, existing: LabelBox[]): boolean {
+  return existing.some((box) => boxesOverlap(candidate, box));
+}
+
+function registerLabelBox(candidate: LabelBox, labelBoxes: LabelBox[]): void {
+  labelBoxes.push(candidate);
+}
+
+function boxesOverlap(a: LabelBox, b: LabelBox): boolean {
+  return !(a.x + a.width <= b.x || b.x + b.width <= a.x || a.y + a.height <= b.y || b.y + b.height <= a.y);
+}
+
+function getCenteredRotatedLabelBox(center: Vec2, dir: Vec2, width: number, height: number): LabelBox {
+  const r = normalize(dir);
+  const theta = rotateCcw(r);
+  const halfHeight = height / 2;
+  const halfWidth = width / 2;
+  const corners = [
+    add(add(center, scale(r, -halfWidth)), scale(theta, -halfHeight)),
+    add(add(center, scale(r, -halfWidth)), scale(theta, halfHeight)),
+    add(add(center, scale(r, halfWidth)), scale(theta, -halfHeight)),
+    add(add(center, scale(r, halfWidth)), scale(theta, halfHeight)),
+  ];
+  const xs = corners.map((point) => point.x);
+  const ys = corners.map((point) => point.y);
+  return {
+    x: Math.min(...xs),
+    y: Math.min(...ys),
+    width: Math.max(...xs) - Math.min(...xs),
+    height: Math.max(...ys) - Math.min(...ys),
+  };
+}
+
+function createPlacedLabel(center: Vec2, dir: Vec2, text: string): SVGTextElement {
   const label = createSvgElement("text");
-  label.setAttribute("x", String(mx + nx));
-  label.setAttribute("y", String(my + ny));
+  label.setAttribute("x", String(center.x));
+  label.setAttribute("y", String(center.y));
   label.setAttribute("text-anchor", "middle");
-  label.setAttribute("class", "ratio-label");
-  label.setAttribute("transform", `rotate(${angle} ${mx + nx} ${my + ny})`);
+  label.setAttribute("dominant-baseline", "middle");
+  label.setAttribute("class", "dimension-label");
+  label.setAttribute("transform", `rotate(${(Math.atan2(dir.y, dir.x) * 180) / Math.PI} ${center.x} ${center.y})`);
   label.textContent = text;
   return label;
 }
 
-function createDimensionLabel(x: number, y: number, text: string, rotate?: string): SVGTextElement {
-  const label = createSvgElement("text");
-  label.setAttribute("x", String(x));
-  label.setAttribute("y", String(y));
-  label.setAttribute("text-anchor", "middle");
-  label.setAttribute("class", "dimension-label");
-  label.textContent = text;
-  if (rotate) {
-    label.setAttribute("transform", `rotate(${rotate} ${x} ${y})`);
-  }
+function createRatioText(center: Vec2, dir: Vec2, text: string): SVGTextElement {
+  const label = createPlacedLabel(center, dir, text);
+  label.setAttribute("class", "ratio-label");
   return label;
+}
+
+function createDashedExtension(from: Vec2, to: Vec2): SVGLineElement {
+  const line = createSvgElement("line");
+  line.setAttribute("x1", String(from.x));
+  line.setAttribute("y1", String(from.y));
+  line.setAttribute("x2", String(to.x));
+  line.setAttribute("y2", String(to.y));
+  line.setAttribute("class", "annotation-guide");
+  return line;
+}
+
+function createEndBar(center: Vec2, theta: Vec2): SVGLineElement {
+  const half = ANNOTATION_UNIT / 2;
+  const start = add(center, scale(theta, -half));
+  const end = add(center, scale(theta, half));
+  return createDimensionLine(start.x, start.y, end.x, end.y);
+}
+
+function createArrowTriangle(tip: Vec2, direction: Vec2): SVGPathElement {
+  const dir = normalize(direction);
+  const theta = rotateCcw(dir);
+  const baseCenter = add(tip, scale(dir, ANNOTATION_ARROW_LENGTH));
+  const left = add(baseCenter, scale(theta, ANNOTATION_ARROW_SIDE / 2));
+  const right = add(baseCenter, scale(theta, -ANNOTATION_ARROW_SIDE / 2));
+  const path = createSvgElement("path");
+  path.setAttribute("d", `M ${tip.x} ${tip.y} L ${left.x} ${left.y} L ${right.x} ${right.y} Z`);
+  path.setAttribute("class", "dimension-arrow");
+  return path;
+}
+
+function createArrowWithTail(tip: Vec2, direction: Vec2, ratio = false): SVGGElement {
+  const group = createSvgElement("g");
+  const dir = normalize(direction);
+  const tailStart = add(tip, scale(dir, ANNOTATION_ARROW_LENGTH + ANNOTATION_UNIT * 0.5));
+  const tailEnd = add(tip, scale(dir, ANNOTATION_ARROW_LENGTH));
+  group.appendChild(ratio ? createRatioLine(tailStart.x, tailStart.y, tailEnd.x, tailEnd.y) : createDimensionLine(tailStart.x, tailStart.y, tailEnd.x, tailEnd.y));
+  group.appendChild(createArrowTriangle(tip, direction));
+  return group;
+}
+
+function createCrossMarker(center: Vec2): SVGGElement {
+  const group = createSvgElement("g");
+  const half = ANNOTATION_UNIT / 2;
+  group.appendChild(createRatioLine(center.x - half, center.y, center.x + half, center.y));
+  group.appendChild(createRatioLine(center.x, center.y - half, center.x, center.y + half));
+  return group;
 }
 
 function getTargetAnchorPoint(
@@ -682,14 +944,14 @@ function getViewportAnchorPoint(
     const y = alignedCoordinate ?? store.spec.viewport.height / 2;
     if (anchor === "left") return { x: 0, y };
     if (anchor === "right") return { x: store.spec.viewport.width, y };
-    if (anchor === "centerX") return { x: store.spec.viewport.width / 2, y };
+    if (anchor === "centerX") return { x: store.spec.viewport.width / 2, y: store.spec.viewport.height / 2 };
   }
 
   if (axis === "y") {
     const x = alignedCoordinate ?? store.spec.viewport.width / 2;
     if (anchor === "top") return { x, y: 0 };
     if (anchor === "bottom") return { x, y: store.spec.viewport.height };
-    if (anchor === "centerY") return { x, y: store.spec.viewport.height / 2 };
+    if (anchor === "centerY") return { x: store.spec.viewport.width / 2, y: store.spec.viewport.height / 2 };
   }
 
   return null;
@@ -717,16 +979,18 @@ function getBoundaryAnchorPoint(
   }
 
   if (axis === "x") {
+    if (anchor === "centerX") return { x: cx, y: cy };
     const y = clamp(alignedCoordinate ?? cy, component.box.y, component.box.y + component.box.height);
     if (anchor === "left") return { x: component.box.x, y };
     if (anchor === "right") return { x: component.box.x + component.box.width, y };
-    return { x: cx, y };
+    return { x: cx, y: cy };
   }
 
+  if (anchor === "centerY") return { x: cx, y: cy };
   const x = clamp(alignedCoordinate ?? cx, component.box.x, component.box.x + component.box.width);
   if (anchor === "top") return { x, y: component.box.y };
   if (anchor === "bottom") return { x, y: component.box.y + component.box.height };
-  return { x, y: cy };
+  return { x: cx, y: cy };
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -895,80 +1159,54 @@ function getOuterSizeAnchorPoint(
   return getSizeAnchorPoint(component, anchor, axis);
 }
 
-function createHorizontalMeasuredLine(x1: number, x2: number, y: number, label: string, forceOutside = false): SVGGElement {
-  const group = createSvgElement("g");
-  const left = Math.min(x1, x2);
-  const right = Math.max(x1, x2);
-  const distance = right - left;
-  const labelWidth = estimateLabelWidth(label);
-  const inner = !forceOutside && distance >= labelWidth + 20;
-
-  group.appendChild(createHitLine(left, y, right, y));
-  group.appendChild(createDimensionLine(left, y, right, y));
-  group.appendChild(createEndBar(left, y, "vertical"));
-  group.appendChild(createEndBar(right, y, "vertical"));
-
-  if (inner) {
-    group.appendChild(createArrowHead(left, y, "left"));
-    group.appendChild(createArrowHead(right, y, "right"));
-    group.appendChild(createDimensionLabel((left + right) / 2, y - 6, label));
-  } else {
-    group.appendChild(createArrowHead(left, y, "right"));
-    group.appendChild(createArrowHead(right, y, "left"));
-    group.appendChild(createDimensionLabel(right + labelWidth / 2 + 12, y - 6, label));
-  }
-
-  return group;
-}
-
-function createVerticalMeasuredLine(x: number, y1: number, y2: number, label: string, forceOutside = false): SVGGElement {
-  const group = createSvgElement("g");
-  const top = Math.min(y1, y2);
-  const bottom = Math.max(y1, y2);
-  const distance = bottom - top;
-  const labelHeight = estimateLabelWidth(label);
-  const inner = !forceOutside && distance >= labelHeight + 20;
-
-  group.appendChild(createHitLine(x, top, x, bottom));
-  group.appendChild(createDimensionLine(x, top, x, bottom));
-  group.appendChild(createEndBar(x, top, "horizontal"));
-  group.appendChild(createEndBar(x, bottom, "horizontal"));
-
-  if (inner) {
-    group.appendChild(createArrowHead(x, top, "up"));
-    group.appendChild(createArrowHead(x, bottom, "down"));
-    group.appendChild(createDimensionLabel(x - 8, (top + bottom) / 2, label, "-90"));
-  } else {
-    group.appendChild(createArrowHead(x, top, "down"));
-    group.appendChild(createArrowHead(x, bottom, "up"));
-    group.appendChild(createDimensionLabel(x - 10, bottom + labelHeight / 2 + 12, label, "-90"));
-  }
-
-  return group;
-}
-
-function createEndBar(x: number, y: number, orientation: "vertical" | "horizontal"): SVGLineElement {
-  if (orientation === "vertical") {
-    return createDimensionLine(x, y - 6, x, y + 6);
-  }
-  return createDimensionLine(x - 6, y, x + 6, y);
-}
-
-function createArrowHead(x: number, y: number, direction: "left" | "right" | "up" | "down"): SVGPathElement {
-  const path = createSvgElement("path");
-  const size = 5;
-  let d = "";
-  if (direction === "left") d = `M ${x} ${y} L ${x + size} ${y - size / 2} L ${x + size} ${y + size / 2} Z`;
-  if (direction === "right") d = `M ${x} ${y} L ${x - size} ${y - size / 2} L ${x - size} ${y + size / 2} Z`;
-  if (direction === "up") d = `M ${x} ${y} L ${x - size / 2} ${y + size} L ${x + size / 2} ${y + size} Z`;
-  if (direction === "down") d = `M ${x} ${y} L ${x - size / 2} ${y - size} L ${x + size / 2} ${y - size} Z`;
-  path.setAttribute("d", d);
-  path.setAttribute("class", "dimension-arrow");
-  return path;
-}
-
 function estimateLabelWidth(text: string): number {
   return Math.max(24, text.length * 6);
+}
+
+function add(a: Vec2, b: Vec2): Vec2 {
+  return { x: a.x + b.x, y: a.y + b.y };
+}
+
+function subtract(a: Vec2, b: Vec2): Vec2 {
+  return { x: a.x - b.x, y: a.y - b.y };
+}
+
+function scale(vector: Vec2, amount: number): Vec2 {
+  return { x: vector.x * amount, y: vector.y * amount };
+}
+
+function dot(a: Vec2, b: Vec2): number {
+  return a.x * b.x + a.y * b.y;
+}
+
+function length(vector: Vec2): number {
+  return Math.hypot(vector.x, vector.y);
+}
+
+function normalize(vector: Vec2): Vec2 {
+  const magnitude = length(vector) || 1;
+  return { x: vector.x / magnitude, y: vector.y / magnitude };
+}
+
+function canonicalizeAnnotationDirection(vector: Vec2): Vec2 {
+  const normalized = normalize(vector);
+  if (normalized.x < -1e-6) return scale(normalized, -1);
+  if (Math.abs(normalized.x) <= 1e-6 && normalized.y < 0) return scale(normalized, -1);
+  return normalized;
+}
+
+function shouldSwapAnnotationEndpoints(start: Vec2, end: Vec2): boolean {
+  if (start.x > end.x + 1e-6) return true;
+  if (Math.abs(start.x - end.x) <= 1e-6 && start.y < end.y - 1e-6) return true;
+  return false;
+}
+
+function rotateCcw(vector: Vec2): Vec2 {
+  return { x: vector.y, y: -vector.x };
+}
+
+function midpoint(a: Vec2, b: Vec2): Vec2 {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
 }
 
 function reserveHorizontalBand(
@@ -983,11 +1221,11 @@ function reserveHorizontalBand(
   while (
     bands.some(
       (band) =>
-        Math.abs(band.y - y) < 14 &&
-        !(end < band.start - 6 || start > band.end + 6),
+        Math.abs(band.y - y) < 14 + ANNOTATION_LINE_GAP &&
+        !(end < band.start - ANNOTATION_LINE_GAP || start > band.end + ANNOTATION_LINE_GAP),
     )
   ) {
-    y -= 16;
+    y -= 16 + ANNOTATION_LINE_GAP;
   }
   bands.push({ y, start, end });
   return y;
@@ -1005,11 +1243,11 @@ function reserveVerticalBand(
   while (
     bands.some(
       (band) =>
-        Math.abs(band.x - x) < 14 &&
-        !(end < band.start - 6 || start > band.end + 6),
+        Math.abs(band.x - x) < 14 + ANNOTATION_LINE_GAP &&
+        !(end < band.start - ANNOTATION_LINE_GAP || start > band.end + ANNOTATION_LINE_GAP),
     )
   ) {
-    x += 16;
+    x += 16 + ANNOTATION_LINE_GAP;
   }
   bands.push({ x, start, end });
   return x;
