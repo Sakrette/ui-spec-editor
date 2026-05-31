@@ -198,6 +198,26 @@ button:hover {
   background: #f8fafc;
 }
 
+.component-row {
+  position: relative;
+  padding: 0;
+}
+
+.component-row-main {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  display: grid;
+  gap: 6px;
+  text-align: left;
+  padding: 10px 36px 10px 10px;
+}
+
+.component-row-main:hover {
+  transform: none;
+  border-color: transparent;
+}
+
 .component-row.is-selected {
   border-color: #f97316;
   background: #fff7ed;
@@ -214,6 +234,23 @@ button:hover {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.component-delete-button {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 999px;
+  border-color: #fecaca;
+  background: #fee2e2;
+  color: #b91c1c;
+  font-size: 14px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
 }
 
 .status-chip {
@@ -257,6 +294,13 @@ button:hover {
 
 .ratio-only-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.ratio-near {
+  color: #94a3b8;
+  font-size: 12px;
+  white-space: nowrap;
+  margin-left: auto;
 }
 
 .selected-head {
@@ -318,11 +362,17 @@ button:hover {
   border: 1px solid #e2e8f0;
   border-radius: 12px;
   background: #f8fafc;
+  display: grid;
+  gap: 8px;
 }
 
 .method-card.is-enabled {
   border-color: #fdba74;
   background: #fff7ed;
+}
+
+.method-card.is-expanded {
+  border-color: #fb923c;
 }
 
 .method-toggle {
@@ -332,7 +382,28 @@ button:hover {
   font-weight: 700;
 }
 
+.method-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .method-toggle input {
+  width: 16px;
+  height: 16px;
+}
+
+.method-lock {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.method-lock input {
   width: 16px;
   height: 16px;
 }
@@ -473,6 +544,32 @@ button:hover {
   pointer-events: none;
 }
 
+.dimension-hit {
+  stroke: transparent;
+  stroke-width: 16;
+  vector-effect: non-scaling-stroke;
+  pointer-events: stroke;
+}
+
+.center-guide,
+.handle-outline {
+  fill: none;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+.center-guide {
+  stroke: #0f766e;
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+}
+
+.handle-outline {
+  stroke: #2563eb;
+  stroke-width: 0.9;
+  stroke-dasharray: 3 4;
+}
+
 .alignment-line {
   stroke: #0f766e;
   stroke-width: 1.5;
@@ -520,6 +617,18 @@ button:hover {
   user-select: none;
 }
 
+.constraint-overlay .is-draggable {
+  cursor: grab;
+}
+
+.constraint-overlay .is-draggable:active {
+  cursor: grabbing;
+}
+
+.constraint-overlay .is-locked {
+  opacity: 0.7;
+}
+
 .component {
   fill: rgb(251 146 60 / 0.18);
   stroke: #9a3412;
@@ -540,6 +649,20 @@ button:hover {
 .component.is-selected.is-under {
   fill: rgb(251 191 36 / 0.24);
   stroke: #d97706;
+}
+
+.resize-handle {
+  fill: #fff;
+  stroke: #2563eb;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.move-handle {
+  fill: #dbeafe;
+  stroke: #2563eb;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
 }
 
 textarea {

@@ -1,7 +1,7 @@
 import "./style.css";
 import { analyzeProjectDof, getAvailableKinds, getShapeLabel } from "./dof";
 import { EditorStore } from "./store";
-import type { AxisKind, ComponentNode, ConstraintKind, ConstraintSpec, SourceAnchor, UnitKind } from "./types";
+import type { AxisKind, Box, ComponentNode, ConstraintKind, ConstraintSpec, SourceAnchor, UnitKind } from "./types";
 
 const store = new EditorStore();
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -108,8 +108,10 @@ app.innerHTML = `
 `;
 
 const canvas = query<SVGSVGElement>("#canvas");
+const sidebar = query<HTMLElement>(".sidebar");
 const componentList = query<HTMLDivElement>("#component-list");
 const selectedPane = query<HTMLDivElement>("#selected-pane");
+selectedPane.setAttribute("data-preserve-selection", "true");
 const exportOutput = query<HTMLTextAreaElement>("#export-output");
 const importInput = query<HTMLTextAreaElement>("#import-input");
 const importFileInput = query<HTMLInputElement>("#import-file-input");
@@ -134,7 +136,14 @@ const copyExportButton = query<HTMLButtonElement>("#copy-export-button");
 const downloadJsonButton = query<HTMLButtonElement>("#download-json-button");
 const downloadPngButton = query<HTMLButtonElement>("#download-png-button");
 
-let dragging: { id: string; lastX: number; lastY: number } | null = null;
+type ControlHandle = "move" | "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
+
+type DragState =
+  | { mode: "move"; id: string; pointerId: number; startClientX: number; startClientY: number; startBox: Box }
+  | { mode: "resize"; id: string; pointerId: number; startClientX: number; startClientY: number; startBox: Box; handle: Exclude<ControlHandle, "move"> }
+  | { mode: "constraint"; constraintId: string; pointerId: number; startClientX: number; startClientY: number; axis: AxisKind; startValue: number };
+
+let dragging: DragState | null = null;
 let expandedMethodKey: string | null = null;
 
 function render(): void {
@@ -142,6 +151,10 @@ function render(): void {
   renderCanvas();
   renderComponentList();
   renderSelectedPane();
+  syncExportState();
+}
+
+function syncExportState(): void {
   exportOutput.value = store.exportJson();
   syncExportModal();
 }
@@ -175,6 +188,11 @@ function renderCanvas(): void {
 
   for (const component of store.components) {
     canvas.appendChild(createConstraintOverlay(component, horizontalBands, verticalBands));
+  }
+
+  const selected = store.selectedId ? store.spec.components[store.selectedId] : null;
+  if (selected && selected.id !== "root") {
+    canvas.appendChild(createResizeHandles(selected));
   }
 }
 
@@ -214,15 +232,64 @@ function createComponentElement(component: ComponentNode, isUnderConstrained: bo
   if (selected) classes.push("is-selected");
   if (isUnderConstrained) classes.push("is-under");
   element.setAttribute("class", classes.join(" "));
+  element.setAttribute("data-preserve-selection", "true");
   element.addEventListener("pointerdown", (event) => {
     const pointerEvent = event as PointerEvent;
+    pointerEvent.stopPropagation();
     store.select(component.id);
-    dragging = { id: component.id, lastX: pointerEvent.clientX, lastY: pointerEvent.clientY };
+    dragging = {
+      mode: "move",
+      id: component.id,
+      pointerId: pointerEvent.pointerId,
+      startClientX: pointerEvent.clientX,
+      startClientY: pointerEvent.clientY,
+      startBox: cloneBox(component.box),
+    };
     canvas.setPointerCapture(pointerEvent.pointerId);
     render();
   });
 
   return element;
+}
+
+function createResizeHandles(component: ComponentNode): SVGGElement {
+  const group = createSvgElement("g");
+  group.setAttribute("class", "resize-handles");
+  group.setAttribute("data-preserve-selection", "true");
+  const ratioLocked = hasLockedRatioConstraint(component.id);
+  const xLocked = ratioLocked || hasLockedAxisConstraint(component.id, "x");
+  const yLocked = ratioLocked || hasLockedAxisConstraint(component.id, "y");
+
+  if (component.shape === "ellipse") {
+    group.appendChild(createHandleOutline(component.box));
+  }
+
+  for (const { handle, x, y, cursor } of getResizeHandlePoints(component.box)) {
+    if (isResizeHandleHidden(handle, xLocked, yLocked)) continue;
+    const node = createControlHandle(component, handle, x, y, cursor);
+    group.appendChild(node);
+  }
+
+  return group;
+}
+
+function hasLockedAxisConstraint(componentId: string, axis: AxisKind): boolean {
+  return store.spec.constraints.some(
+    (constraint) => constraint.componentId === componentId && constraint.axis === axis && constraint.locked,
+  );
+}
+
+function hasLockedRatioConstraint(componentId: string): boolean {
+  return store.spec.constraints.some(
+    (constraint) => constraint.componentId === componentId && constraint.kind === "ratio" && constraint.locked,
+  );
+}
+
+function isResizeHandleHidden(handle: ControlHandle, xLocked: boolean, yLocked: boolean): boolean {
+  if (handle === "move") return xLocked && yLocked;
+  if (xLocked && ["e", "w", "ne", "nw", "se", "sw"].includes(handle)) return true;
+  if (yLocked && ["n", "s", "ne", "nw", "se", "sw"].includes(handle)) return true;
+  return false;
 }
 
 function createConstraintOverlay(
@@ -274,7 +341,7 @@ function createConstraintOverlay(
   }
 
   if (ratioConstraint) {
-    overlay.appendChild(createRatioOverlay(component));
+    overlay.appendChild(createRatioOverlay(component, ratioConstraint));
   }
 
   return overlay;
@@ -294,6 +361,13 @@ function createHorizontalDimension(
   if (!target || !source) return group;
   if (Math.abs(source.x - target.x) < 0.5) {
     group.appendChild(createAlignmentLine(source.x, source.y, target.x, target.y));
+    if (constraint.sourceAnchor === "centerX") {
+      const centerX = component.box.x + component.box.width / 2;
+      const centerY = component.box.y + component.box.height / 2;
+      group.appendChild(createCenterGuide(centerX, centerY, centerX, target.y));
+    }
+    group.appendChild(createHitLine(source.x, source.y, target.x, target.y));
+    wireConstraintDrag(group, constraint, "x");
     return group;
   }
 
@@ -301,7 +375,13 @@ function createHorizontalDimension(
   const y = reserveHorizontalBand(horizontalBands, proposedY, source.x, target.x);
   group.appendChild(createExtensionLine(source.x, source.y, source.x, y));
   group.appendChild(createExtensionLine(target.x, target.y, target.x, y));
+  if (constraint.sourceAnchor === "centerX") {
+    const centerX = component.box.x + component.box.width / 2;
+    const centerY = component.box.y + component.box.height / 2;
+    group.appendChild(createCenterGuide(centerX, centerY, centerX, y));
+  }
   group.appendChild(createHorizontalMeasuredLine(source.x, target.x, y, formatConstraintLabel(constraint)));
+  wireConstraintDrag(group, constraint, "x");
   return group;
 }
 
@@ -319,6 +399,13 @@ function createVerticalDimension(
   if (!target || !source) return group;
   if (Math.abs(source.y - target.y) < 0.5) {
     group.appendChild(createAlignmentLine(source.x, source.y, target.x, target.y));
+    if (constraint.sourceAnchor === "centerY") {
+      const centerX = component.box.x + component.box.width / 2;
+      const centerY = component.box.y + component.box.height / 2;
+      group.appendChild(createCenterGuide(centerX, centerY, target.x, centerY));
+    }
+    group.appendChild(createHitLine(source.x, source.y, target.x, target.y));
+    wireConstraintDrag(group, constraint, "y");
     return group;
   }
 
@@ -326,7 +413,13 @@ function createVerticalDimension(
   const x = reserveVerticalBand(verticalBands, proposedX, source.y, target.y);
   group.appendChild(createExtensionLine(source.x, source.y, x, source.y));
   group.appendChild(createExtensionLine(target.x, target.y, x, target.y));
+  if (constraint.sourceAnchor === "centerY") {
+    const centerX = component.box.x + component.box.width / 2;
+    const centerY = component.box.y + component.box.height / 2;
+    group.appendChild(createCenterGuide(centerX, centerY, x, centerY));
+  }
   group.appendChild(createVerticalMeasuredLine(x, source.y, target.y, formatConstraintLabel(constraint)));
+  wireConstraintDrag(group, constraint, "y");
   return group;
 }
 
@@ -340,23 +433,37 @@ function createSizeDimension(
   const group = createSvgElement("g");
 
   if (axis === "x") {
-    const left = getSizeAnchorPoint(component, "left", "x");
-    const right = getSizeAnchorPoint(component, "right", "x");
+    const left = getOuterSizeAnchorPoint(component, "left", "x");
+    const right = getOuterSizeAnchorPoint(component, "right", "x");
+    if (component.shape === "ellipse") {
+      const leftTangent = getSizeAnchorPoint(component, "left", "x");
+      const rightTangent = getSizeAnchorPoint(component, "right", "x");
+      group.appendChild(createExtensionLine(leftTangent.x, leftTangent.y, left.x, left.y));
+      group.appendChild(createExtensionLine(rightTangent.x, rightTangent.y, right.x, right.y));
+    }
     const proposedY = Math.max(left.y, right.y) + 24;
     const y = reserveHorizontalBand(horizontalBands, proposedY, left.x, right.x);
     group.appendChild(createExtensionLine(left.x, left.y, left.x, y));
     group.appendChild(createExtensionLine(right.x, right.y, right.x, y));
     group.appendChild(createHorizontalMeasuredLine(left.x, right.x, y, formatConstraintLabel(constraint)));
+    wireConstraintDrag(group, constraint, "x");
     return group;
   }
 
-  const top = getSizeAnchorPoint(component, "top", "y");
-  const bottom = getSizeAnchorPoint(component, "bottom", "y");
+  const top = getOuterSizeAnchorPoint(component, "top", "y");
+  const bottom = getOuterSizeAnchorPoint(component, "bottom", "y");
+  if (component.shape === "ellipse") {
+    const topTangent = getSizeAnchorPoint(component, "top", "y");
+    const bottomTangent = getSizeAnchorPoint(component, "bottom", "y");
+    group.appendChild(createExtensionLine(topTangent.x, topTangent.y, top.x, top.y));
+    group.appendChild(createExtensionLine(bottomTangent.x, bottomTangent.y, bottom.x, bottom.y));
+  }
   const proposedX = Math.max(top.x, bottom.x) + 24;
   const x = reserveVerticalBand(verticalBands, proposedX, top.y, bottom.y);
   group.appendChild(createExtensionLine(top.x, top.y, x, top.y));
   group.appendChild(createExtensionLine(bottom.x, bottom.y, x, bottom.y));
   group.appendChild(createVerticalMeasuredLine(x, top.y, bottom.y, formatConstraintLabel(constraint)));
+  wireConstraintDrag(group, constraint, "y");
   return group;
 }
 
@@ -370,7 +477,34 @@ function createCenterCross(component: ComponentNode): SVGGElement {
   return group;
 }
 
-function createRatioOverlay(component: ComponentNode): SVGGElement {
+function wireConstraintDrag(group: SVGGElement, constraint: ConstraintSpec, axis: AxisKind): void {
+  if (constraint.locked) {
+    group.classList.add("is-locked");
+    group.setAttribute("data-preserve-selection", "true");
+    return;
+  }
+
+  group.classList.add("is-draggable");
+  group.setAttribute("data-preserve-selection", "true");
+  group.addEventListener("pointerdown", (event) => {
+    const pointerEvent = event as PointerEvent;
+    pointerEvent.stopPropagation();
+    store.select(constraint.componentId);
+    dragging = {
+      mode: "constraint",
+      constraintId: constraint.id,
+      pointerId: pointerEvent.pointerId,
+      startClientX: pointerEvent.clientX,
+      startClientY: pointerEvent.clientY,
+      axis,
+      startValue: constraint.value,
+    };
+    canvas.setPointerCapture(pointerEvent.pointerId);
+    render();
+  });
+}
+
+function createRatioOverlay(component: ComponentNode, ratioConstraint?: ConstraintSpec): SVGGElement {
   const group = createSvgElement("g");
   const center = {
     x: component.box.x + component.box.width / 2,
@@ -395,7 +529,7 @@ function createRatioOverlay(component: ComponentNode): SVGGElement {
       center.y,
       corner.x,
       corner.y,
-      formatRatioLabel(component.box.width, component.box.height),
+      formatRatioDisplayLabel(ratioConstraint, component.box.width, component.box.height),
     ),
   );
   return group;
@@ -418,6 +552,26 @@ function createDimensionLine(x1: number, y1: number, x2: number, y2: number): SV
   line.setAttribute("x2", String(x2));
   line.setAttribute("y2", String(y2));
   line.setAttribute("class", "dimension-line");
+  return line;
+}
+
+function createHitLine(x1: number, y1: number, x2: number, y2: number): SVGLineElement {
+  const line = createSvgElement("line");
+  line.setAttribute("x1", String(x1));
+  line.setAttribute("y1", String(y1));
+  line.setAttribute("x2", String(x2));
+  line.setAttribute("y2", String(y2));
+  line.setAttribute("class", "dimension-hit");
+  return line;
+}
+
+function createCenterGuide(x1: number, y1: number, x2: number, y2: number): SVGLineElement {
+  const line = createSvgElement("line");
+  line.setAttribute("x1", String(x1));
+  line.setAttribute("y1", String(y1));
+  line.setAttribute("x2", String(x2));
+  line.setAttribute("y2", String(y2));
+  line.setAttribute("class", "center-guide");
   return line;
 }
 
@@ -579,6 +733,127 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function cloneBox(box: Box): Box {
+  return { ...box };
+}
+
+function getResizeHandlePoints(box: Box): Array<{ handle: ControlHandle; x: number; y: number; cursor: string }> {
+  const left = box.x;
+  const right = box.x + box.width;
+  const top = box.y;
+  const bottom = box.y + box.height;
+  const centerX = box.x + box.width / 2;
+  const centerY = box.y + box.height / 2;
+
+  return [
+    { handle: "move", x: centerX, y: centerY, cursor: "move" },
+    { handle: "nw", x: left, y: top, cursor: "nwse-resize" },
+    { handle: "n", x: centerX, y: top, cursor: "ns-resize" },
+    { handle: "ne", x: right, y: top, cursor: "nesw-resize" },
+    { handle: "e", x: right, y: centerY, cursor: "ew-resize" },
+    { handle: "se", x: right, y: bottom, cursor: "nwse-resize" },
+    { handle: "s", x: centerX, y: bottom, cursor: "ns-resize" },
+    { handle: "sw", x: left, y: bottom, cursor: "nesw-resize" },
+    { handle: "w", x: left, y: centerY, cursor: "ew-resize" },
+  ];
+}
+
+function getCanvasDelta(clientDx: number, clientDy: number): { dx: number; dy: number } {
+  const rect = canvas.getBoundingClientRect();
+  const viewBox = canvas.viewBox.baseVal;
+  const scaleX = rect.width === 0 ? 1 : viewBox.width / rect.width;
+  const scaleY = rect.height === 0 ? 1 : viewBox.height / rect.height;
+  return { dx: clientDx * scaleX, dy: clientDy * scaleY };
+}
+
+function getResizedBox(startBox: Box, handle: Exclude<ControlHandle, "move">, dx: number, dy: number): Box {
+  const minSize = 12;
+  let left = startBox.x;
+  let right = startBox.x + startBox.width;
+  let top = startBox.y;
+  let bottom = startBox.y + startBox.height;
+
+  if (handle.includes("w")) {
+    left = Math.min(startBox.x + startBox.width - minSize, startBox.x + dx);
+  }
+  if (handle.includes("e")) {
+    right = Math.max(startBox.x + minSize, startBox.x + startBox.width + dx);
+  }
+  if (handle.includes("n")) {
+    top = Math.min(startBox.y + startBox.height - minSize, startBox.y + dy);
+  }
+  if (handle.includes("s")) {
+    bottom = Math.max(startBox.y + minSize, startBox.y + startBox.height + dy);
+  }
+
+  return {
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top,
+  };
+}
+
+function createControlHandle(
+  component: ComponentNode,
+  handle: ControlHandle,
+  x: number,
+  y: number,
+  cursor: string,
+): SVGElement {
+  const node = createSvgElement(handle === "move" ? "circle" : "rect");
+  if (node instanceof SVGCircleElement) {
+    node.setAttribute("cx", String(x));
+    node.setAttribute("cy", String(y));
+    node.setAttribute("r", "5");
+  } else {
+    node.setAttribute("x", String(x - 5));
+    node.setAttribute("y", String(y - 5));
+    node.setAttribute("width", "10");
+    node.setAttribute("height", "10");
+    node.setAttribute("rx", "2");
+  }
+  node.setAttribute("class", handle === "move" ? "move-handle" : "resize-handle");
+  node.style.cursor = cursor;
+  node.addEventListener("pointerdown", (event) => {
+    const pointerEvent = event as PointerEvent;
+    pointerEvent.stopPropagation();
+    store.select(component.id);
+    dragging =
+      handle === "move"
+        ? {
+            mode: "move",
+            id: component.id,
+            pointerId: pointerEvent.pointerId,
+            startClientX: pointerEvent.clientX,
+            startClientY: pointerEvent.clientY,
+            startBox: cloneBox(component.box),
+          }
+        : {
+            mode: "resize",
+            id: component.id,
+            pointerId: pointerEvent.pointerId,
+            startClientX: pointerEvent.clientX,
+            startClientY: pointerEvent.clientY,
+            startBox: cloneBox(component.box),
+            handle,
+          };
+    canvas.setPointerCapture(pointerEvent.pointerId);
+    render();
+  });
+  return node;
+}
+
+function createHandleOutline(box: Box): SVGRectElement {
+  const outline = createSvgElement("rect");
+  outline.setAttribute("x", String(box.x));
+  outline.setAttribute("y", String(box.y));
+  outline.setAttribute("width", String(box.width));
+  outline.setAttribute("height", String(box.height));
+  outline.setAttribute("class", "handle-outline");
+  return outline;
+}
+
 function getSizeAnchorPoint(
   component: ComponentNode,
   anchor: "left" | "right" | "top" | "bottom",
@@ -600,14 +875,35 @@ function getSizeAnchorPoint(
   return { x: component.box.x + component.box.width, y: component.box.y + component.box.height };
 }
 
-function createHorizontalMeasuredLine(x1: number, x2: number, y: number, label: string): SVGGElement {
+function getOuterSizeAnchorPoint(
+  component: ComponentNode,
+  anchor: "left" | "right" | "top" | "bottom",
+  axis: AxisKind,
+): { x: number; y: number } {
+  if (component.shape === "ellipse") {
+    if (axis === "x") {
+      return anchor === "left"
+        ? { x: component.box.x, y: component.box.y + component.box.height }
+        : { x: component.box.x + component.box.width, y: component.box.y + component.box.height };
+    }
+
+    return anchor === "top"
+      ? { x: component.box.x + component.box.width, y: component.box.y }
+      : { x: component.box.x + component.box.width, y: component.box.y + component.box.height };
+  }
+
+  return getSizeAnchorPoint(component, anchor, axis);
+}
+
+function createHorizontalMeasuredLine(x1: number, x2: number, y: number, label: string, forceOutside = false): SVGGElement {
   const group = createSvgElement("g");
   const left = Math.min(x1, x2);
   const right = Math.max(x1, x2);
   const distance = right - left;
   const labelWidth = estimateLabelWidth(label);
-  const inner = distance >= labelWidth + 20;
+  const inner = !forceOutside && distance >= labelWidth + 20;
 
+  group.appendChild(createHitLine(left, y, right, y));
   group.appendChild(createDimensionLine(left, y, right, y));
   group.appendChild(createEndBar(left, y, "vertical"));
   group.appendChild(createEndBar(right, y, "vertical"));
@@ -625,14 +921,15 @@ function createHorizontalMeasuredLine(x1: number, x2: number, y: number, label: 
   return group;
 }
 
-function createVerticalMeasuredLine(x: number, y1: number, y2: number, label: string): SVGGElement {
+function createVerticalMeasuredLine(x: number, y1: number, y2: number, label: string, forceOutside = false): SVGGElement {
   const group = createSvgElement("g");
   const top = Math.min(y1, y2);
   const bottom = Math.max(y1, y2);
   const distance = bottom - top;
   const labelHeight = estimateLabelWidth(label);
-  const inner = distance >= labelHeight + 20;
+  const inner = !forceOutside && distance >= labelHeight + 20;
 
+  group.appendChild(createHitLine(x, top, x, bottom));
   group.appendChild(createDimensionLine(x, top, x, bottom));
   group.appendChild(createEndBar(x, top, "horizontal"));
   group.appendChild(createEndBar(x, bottom, "horizontal"));
@@ -725,23 +1022,80 @@ function formatConstraintLabel(constraint: ConstraintSpec): string {
   return `${Math.abs(constraint.value)}px`;
 }
 
-function formatRatioLabel(width: number, height: number): string {
-  const w = Math.max(1, Math.round(Math.abs(width)));
-  const h = Math.max(1, Math.round(Math.abs(height)));
-  const divisor = gcd(w, h);
-  const reducedW = w / divisor;
-  const reducedH = h / divisor;
-  const smaller = Math.min(reducedW, reducedH);
+function formatRatioDisplayLabel(
+  ratioConstraint: ConstraintSpec | undefined,
+  width: number,
+  height: number,
+): string {
+  return formatRatioFromNumber(ratioConstraint?.kind === "ratio" ? ratioConstraint.value : width / Math.max(1, height));
+}
+
+function formatRatioFromNumber(ratio: number): string {
+  const absolute = Math.abs(ratio || 1);
+  if (absolute >= 1000) return "1:0";
+  if (absolute <= 0.001) return "0:1";
+
+  const reduced = approximateRatioParts(absolute, 5);
+  const smaller = Math.min(reduced.w, reduced.h);
 
   if (smaller <= 20) {
-    return `${reducedW}:${reducedH}`;
+    return `${reduced.w}:${reduced.h}`;
   }
 
-  const ratio = w / h;
-  if (ratio >= 1000) return "1:0";
-  if (ratio <= 0.001) return "0:1";
-  if (ratio >= 1) return `${trimRatio(ratio)}:1`;
-  return `1:${trimRatio(1 / ratio)}`;
+  if (absolute >= 1) return `${trimRatio(absolute)}:1`;
+  return `1:${trimRatio(1 / absolute)}`;
+}
+
+function approximateRatioParts(value: number, maxDepth: number): { w: number; h: number } {
+  if (!Number.isFinite(value) || value <= 0) return { w: 1, h: 1 };
+
+  let x = value;
+  let hPrev = 0;
+  let hCurr = 1;
+  let kPrev = 1;
+  let kCurr = 0;
+
+  for (let depth = 0; depth < maxDepth; depth += 1) {
+    const a = Math.floor(x);
+    const hNext = a * hCurr + hPrev;
+    const kNext = a * kCurr + kPrev;
+
+    hPrev = hCurr;
+    hCurr = hNext;
+    kPrev = kCurr;
+    kCurr = kNext;
+
+    const fraction = x - a;
+    if (fraction <= 1e-9) break;
+    x = 1 / fraction;
+  }
+
+  return {
+    w: Math.max(1, Math.round(hCurr)),
+    h: Math.max(1, Math.round(kCurr)),
+  };
+}
+
+function getRatioNearHint(constraint?: ConstraintSpec): string | null {
+  if (!constraint || constraint.kind !== "ratio") return null;
+
+  const raw = constraint.ratioParts ?? formatRatioParts(constraint.value);
+  const rawW = Math.max(0, Math.round(Math.abs(raw.w)));
+  const rawH = Math.max(0, Math.round(Math.abs(raw.h)));
+  if (rawW === 0 || rawH === 0) return null;
+
+  const best = approximateRatioParts(Math.abs(constraint.value || 1), 5);
+  if (best.w <= 0 || best.h <= 0) return null;
+  if (Math.min(best.w, best.h) > 20) return null;
+
+  const scaleW = rawW / best.w;
+  const scaleH = rawH / best.h;
+  const nearestScale = Math.max(1, Math.round((scaleW + scaleH) / 2));
+  const nearW = best.w * nearestScale;
+  const nearH = best.h * nearestScale;
+
+  if (nearW === rawW && nearH === rawH) return null;
+  return `${nearW}/${nearH}`;
 }
 
 function trimRatio(value: number): string {
@@ -789,24 +1143,31 @@ function renderComponentList(): void {
     const report = analysis.components.find((item) => item.componentId === component.id);
     if (!report) continue;
 
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = [
+    const row = document.createElement("div");
+    row.className = [
       "component-row",
       component.id === store.selectedId ? "is-selected" : "",
       report.status === "under" ? "is-under" : "",
     ]
       .filter(Boolean)
       .join(" ");
-    button.innerHTML = `
-      <strong>${component.name}</strong>
-      <span class="row-meta">${getShapeLabel(component.shape)}</span>
+    row.innerHTML = `
+      <button class="component-row-main" type="button" data-preserve-selection="true">
+        <strong>${component.name}</strong>
+        <span class="row-meta">${getShapeLabel(component.shape)}</span>
+      </button>
+      <button class="component-delete-button" type="button" aria-label="Delete ${escapeAttribute(component.name)}">×</button>
     `;
-    button.addEventListener("click", () => {
+    row.querySelector<HTMLButtonElement>(".component-row-main")?.addEventListener("click", () => {
       store.select(component.id);
       render();
     });
-    componentList.appendChild(button);
+    row.querySelector<HTMLButtonElement>(".component-delete-button")?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      store.deleteComponent(component.id);
+      render();
+    });
+    componentList.appendChild(row);
   }
 }
 
@@ -851,16 +1212,20 @@ function renderSelectedPane(): void {
       ${renderAxisEditor(selected.id, "x")}
       ${renderAxisEditor(selected.id, "y")}
     </div>
-    <button id="delete-component-button" type="button">Delete Component</button>
   `;
 
-  bindSelectedInputs();
+bindSelectedInputs();
   bindConstraintEditors(selected.id);
 }
 
 function renderAxisEditor(componentId: string, axis: AxisKind): string {
   const current = store.spec.constraints.filter((constraint) => constraint.componentId === componentId && constraint.axis === axis);
   const currentKinds = new Set(current.map((constraint) => constraint.kind));
+  const dimensionalKinds = new Set(
+    store.spec.constraints
+      .filter((constraint) => constraint.componentId === componentId && isDimensionalKind(constraint.kind))
+      .map((constraint) => constraint.kind),
+  );
   const available = getAvailableKinds(axis);
   const oppositeAxis = axis === "x" ? "y" : "x";
   const ratioUsedOnOtherAxis = store.spec.constraints.some(
@@ -889,6 +1254,7 @@ function renderAxisEditor(componentId: string, axis: AxisKind): string {
               current.find((constraint) => constraint.kind === kind),
               kind === "ratio" && ratioUsedOnOtherAxis,
               axisFull,
+              dimensionalKinds,
             ),
           )
           .join("")}
@@ -904,17 +1270,21 @@ function renderConstraintMethod(
   constraint?: ConstraintSpec,
   ratioLocked = false,
   axisFull = false,
+  dimensionalKinds: Set<ConstraintKind> = new Set(),
 ): string {
   const enabled = Boolean(constraint);
   const isRatio = kind === "ratio";
   const methodKey = getMethodKey(componentId, axis, kind);
   const expanded = enabled && expandedMethodKey === methodKey;
-  const disabled = !enabled && (ratioLocked || axisFull);
+  const dimensionalFull = isDimensionalKind(kind) && !enabled && dimensionalKinds.size >= 2;
+  const disabled = !enabled && (ratioLocked || axisFull || dimensionalFull);
+  const locked = constraint?.locked ?? store.getConstraintDraft(componentId, axis, kind)?.locked ?? false;
   const sourceValue = constraint?.sourceComponentId ?? "viewport";
   const anchorOptions = getAnchorOptions(axis, kind, sourceValue === "viewport")
     .map((anchor) => `<option value="${anchor}" ${constraint?.sourceAnchor === anchor ? "selected" : ""}>${formatAnchor(anchor)}</option>`)
     .join("");
   const isSizeOnly = kind === "width" || kind === "height";
+  const ratioNearHint = isRatio ? getRatioNearHint(constraint) : null;
   const fields = isRatio
       ? `
           <div class="method-fields" ${expanded ? "" : "hidden"}>
@@ -1016,18 +1386,34 @@ function renderConstraintMethod(
 
   return `
     <div class="method-card ${enabled ? "is-enabled" : ""} ${expanded ? "is-expanded" : ""}" data-method-card="${methodKey}">
-      <label class="method-toggle" data-method-head="${methodKey}">
-        <input
-          type="checkbox"
-          data-role="toggle"
-          data-component="${componentId}"
-          data-axis="${axis}"
-          data-kind="${kind}"
-          ${enabled ? "checked" : ""}
-          ${disabled ? "disabled" : ""}
-        />
-        <span>${kind}</span>
-      </label>
+      <div class="method-head-row">
+        <label class="method-toggle" data-method-head="${methodKey}">
+          <input
+            type="checkbox"
+            data-role="toggle"
+            data-component="${componentId}"
+            data-axis="${axis}"
+            data-kind="${kind}"
+            ${enabled ? "checked" : ""}
+            ${disabled ? "disabled" : ""}
+          />
+          <span>${kind}</span>
+        </label>
+        ${ratioNearHint ? `<span class="ratio-near">near: ${ratioNearHint}</span>` : ""}
+        ${enabled ? `
+          <label class="method-lock">
+          <input
+            type="checkbox"
+            data-role="lock"
+            data-component="${componentId}"
+            data-axis="${axis}"
+            data-kind="${kind}"
+            ${locked ? "checked" : ""}
+          />
+          <span>Lock</span>
+        </label>
+        ` : ""}
+      </div>
       ${enabled ? fields : ""}
     </div>
   `;
@@ -1052,18 +1438,17 @@ function getAnchorOptions(axis: AxisKind, kind: ConstraintKind, isViewport: bool
 function bindSelectedInputs(): void {
   queryWithin<HTMLInputElement>(selectedPane, "#selected-name").addEventListener("input", (event) => {
     store.updateSelectedName((event.target as HTMLInputElement).value.trim());
-    render();
+    renderComponentList();
+    syncExportState();
   });
 
   queryWithin<HTMLSelectElement>(selectedPane, "#selected-shape").addEventListener("change", (event) => {
     store.updateSelectedShape((event.target as HTMLSelectElement).value as ComponentNode["shape"]);
-    render();
+    renderCanvas();
+    renderComponentList();
+    syncExportState();
   });
 
-  queryWithin<HTMLButtonElement>(selectedPane, "#delete-component-button").addEventListener("click", () => {
-    store.deleteSelectedComponent();
-    render();
-  });
 }
 
 function bindConstraintEditors(componentId: string): void {
@@ -1096,9 +1481,18 @@ function bindConstraintEditors(componentId: string): void {
     });
   }
 
+  for (const checkbox of selectedPane.querySelectorAll<HTMLInputElement>('input[data-role="lock"]')) {
+    checkbox.addEventListener("change", () => {
+      const axis = checkbox.dataset.axis as AxisKind;
+      const kind = checkbox.dataset.kind as ConstraintKind;
+      store.updateConstraintLock(componentId, axis, kind, checkbox.checked);
+      render();
+    });
+  }
+
   for (const field of selectedPane.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-role]")) {
     const role = field.dataset.role;
-    if (!role || role === "toggle") continue;
+    if (!role || role === "toggle" || role === "lock") continue;
     field.addEventListener("input", () => updateConstraintFromRow(componentId, field));
     field.addEventListener("change", () => updateConstraintFromRow(componentId, field));
   }
@@ -1117,7 +1511,7 @@ function updateConstraintFromRow(componentId: string, element: HTMLInputElement 
   const sourceComponentId = kind === "ratio" ? componentId : source && source.value !== "viewport" ? source.value : null;
   const sourceAnchor = kind === "ratio" ? "ratio" : ((anchor?.value ?? getDefaultAnchor(axis, kind)) as SourceAnchor);
   const resolvedUnit = kind === "ratio" ? "ratio" : ((unit?.value ?? "px") as UnitKind);
-  const resolvedValue =
+  let resolvedValue =
     kind === "ratio"
       ? parseRatioParts(ratioW?.value ?? "1", ratioH?.value ?? "1")
       : Number(value?.value ?? 0);
@@ -1128,6 +1522,7 @@ function updateConstraintFromRow(componentId: string, element: HTMLInputElement 
           h: Math.max(0, Number(ratioH?.value ?? "1")) || 0,
         }
       : undefined;
+  const locked = selectedPane.querySelector<HTMLInputElement>(`[data-role="lock"][data-axis="${axis}"][data-kind="${kind}"]`)?.checked ?? false;
 
   if (kind !== "ratio" && (element.dataset.role === "source" || element.dataset.role === "anchor" || element.dataset.role === "unit")) {
     const measured = store.measureDraftConstraint({
@@ -1142,6 +1537,7 @@ function updateConstraintFromRow(componentId: string, element: HTMLInputElement 
         if (value) {
           value.value = String(measured);
         }
+        resolvedValue = measured;
       }
     }
 
@@ -1153,15 +1549,22 @@ function updateConstraintFromRow(componentId: string, element: HTMLInputElement 
     sourceAnchor,
     value: resolvedValue,
     unit: resolvedUnit,
+    locked,
     ratioParts,
   });
 
-  render();
+  renderCanvas();
+  renderComponentList();
+  syncExportState();
 }
 
 function getDefaultAnchor(axis: AxisKind, kind: ConstraintKind): SourceAnchor {
   if (kind === "ratio") return "ratio";
   return axis === "x" ? "left" : "top";
+}
+
+function isDimensionalKind(kind: ConstraintKind): kind is "width" | "height" | "ratio" {
+  return kind === "width" || kind === "height" || kind === "ratio";
 }
 
 function formatAnchor(anchor: SourceAnchor): string {
@@ -1190,16 +1593,57 @@ viewportHeightInput.addEventListener("input", () => {
 
 canvas.addEventListener("pointermove", (event) => {
   if (!dragging) return;
-  const dx = event.clientX - dragging.lastX;
-  const dy = event.clientY - dragging.lastY;
-  dragging.lastX = event.clientX;
-  dragging.lastY = event.clientY;
-  store.moveSelected(dx, dy);
+  const { dx, dy } = getCanvasDelta(
+    event.clientX - dragging.startClientX,
+    event.clientY - dragging.startClientY,
+  );
+
+  if (dragging.mode === "move") {
+    store.setComponentBox(dragging.id, {
+      x: dragging.startBox.x + dx,
+      y: dragging.startBox.y + dy,
+      width: dragging.startBox.width,
+      height: dragging.startBox.height,
+    });
+  } else if (dragging.mode === "resize") {
+    store.setComponentBox(dragging.id, getResizedBox(dragging.startBox, dragging.handle, dx, dy));
+  } else {
+    store.adjustConstraintValue(dragging.constraintId, dragging.axis === "x" ? dx : dy, dragging.startValue);
+  }
   render();
 });
 
-canvas.addEventListener("pointerup", () => {
+canvas.addEventListener("pointerdown", (event) => {
+  const target = event.target as Element | null;
+  if (target?.closest("[data-preserve-selection='true']")) return;
+  if (store.selectedId === null && expandedMethodKey === null) return;
   dragging = null;
+  store.clearSelection();
+  expandedMethodKey = null;
+  render();
+});
+
+sidebar.addEventListener("pointerdown", (event) => {
+  const target = event.target as Element | null;
+  if (!target) return;
+  if (target.closest(".component-row-main")) return;
+  if (store.selectedId === null && expandedMethodKey === null) return;
+  dragging = null;
+  store.clearSelection();
+  expandedMethodKey = null;
+  render();
+});
+
+canvas.addEventListener("pointerup", (event) => {
+  if (dragging && dragging.pointerId === event.pointerId) {
+    dragging = null;
+  }
+});
+
+canvas.addEventListener("pointerleave", (event) => {
+  if (dragging && dragging.pointerId === event.pointerId) {
+    dragging = null;
+  }
 });
 
 openExportModalButton.addEventListener("click", () => {
@@ -1337,7 +1781,6 @@ function escapeAttribute(value: string): string {
 }
 
 function syncExportModal(): void {
-  exportOutput.value = store.exportJson();
   exportOutput.readOnly = true;
   const jsonMode = exportFormatJson.checked;
   exportJsonPanel.hidden = !jsonMode;
