@@ -1,0 +1,1394 @@
+import "./style.css";
+import { analyzeProjectDof, getAvailableKinds, getShapeLabel } from "./dof";
+import { EditorStore } from "./store";
+import type { AxisKind, ComponentNode, ConstraintKind, ConstraintSpec, SourceAnchor, UnitKind } from "./types";
+
+const store = new EditorStore();
+const app = document.querySelector<HTMLDivElement>("#app");
+
+if (!app) throw new Error("#app was not found");
+
+app.innerHTML = `
+  <main class="editor-shell">
+    <aside class="sidebar">
+      <h1>UI Spec Editor</h1>
+      <div class="title-actions">
+        <button id="open-import-modal" type="button">Import</button>
+        <button id="open-export-modal" type="button">Export</button>
+      </div>
+      <section class="panel">
+        <h2>Viewport</h2>
+        <div class="field-grid">
+          <label class="field">
+            <span>Width</span>
+            <input id="viewport-width" type="number" min="100" step="1" />
+          </label>
+          <label class="field">
+            <span>Height</span>
+            <input id="viewport-height" type="number" min="100" step="1" />
+          </label>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Components</h2>
+        <div id="component-list"></div>
+        <button id="add-component-button" type="button">Add Component</button>
+      </section>
+    </aside>
+    <section class="workspace">
+      <div class="workspace-header">
+        <div>
+          <strong>Canvas</strong>
+          <span id="canvas-size"></span>
+        </div>
+      </div>
+      <svg id="canvas" viewBox="0 0 960 540" aria-label="Editor canvas"></svg>
+    </section>
+    <aside class="inspector-column">
+      <section class="panel selected-panel">
+        <h2>Selected Component</h2>
+        <div id="selected-pane"></div>
+      </section>
+    </aside>
+  </main>
+  <div id="export-modal" class="modal-shell" hidden>
+    <div class="modal-backdrop" data-close-export-modal="true"></div>
+    <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="export-title">
+      <div class="modal-head">
+        <h2 id="export-title">Export</h2>
+        <button id="close-export-modal" class="icon-button" type="button" aria-label="Close export dialog">×</button>
+      </div>
+      <div class="export-mode">
+        <label class="mode-option">
+          <input id="export-format-json" type="radio" name="export-format" value="json" checked />
+          <span>JSON</span>
+        </label>
+        <label class="mode-option">
+          <input id="export-format-png" type="radio" name="export-format" value="png" />
+          <span>PNG</span>
+        </label>
+      </div>
+      <div id="export-json-panel" class="export-panel-body">
+        <textarea id="export-output" spellcheck="false"></textarea>
+        <div class="field-grid">
+          <button id="copy-export-button" type="button">Copy JSON</button>
+          <button id="download-json-button" type="button">Download JSON</button>
+        </div>
+      </div>
+      <div id="export-png-panel" class="export-panel-body" hidden>
+        <p class="hint">Export the current canvas as a PNG snapshot.</p>
+        <button id="download-png-button" type="button">Download PNG</button>
+      </div>
+    </section>
+  </div>
+  <div id="import-modal" class="modal-shell" hidden>
+    <div class="modal-backdrop" data-close-import-modal="true"></div>
+    <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="import-title">
+      <div class="modal-head">
+        <h2 id="import-title">Import</h2>
+        <button id="close-import-modal" class="icon-button" type="button" aria-label="Close import dialog">×</button>
+      </div>
+      <div class="import-panel-body">
+        <label class="field">
+          <span>JSON File</span>
+          <input id="import-file-input" type="file" accept=".json,application/json" />
+        </label>
+        <label class="field">
+          <span>Raw JSON</span>
+          <textarea id="import-input" spellcheck="false" placeholder="Paste exported JSON here"></textarea>
+        </label>
+        <p id="import-error" class="hint import-error" hidden></p>
+        <div class="field-grid">
+          <button id="apply-import-button" type="button">Apply Import</button>
+          <button id="clear-import-button" type="button">Clear</button>
+        </div>
+      </div>
+    </section>
+  </div>
+`;
+
+const canvas = query<SVGSVGElement>("#canvas");
+const componentList = query<HTMLDivElement>("#component-list");
+const selectedPane = query<HTMLDivElement>("#selected-pane");
+const exportOutput = query<HTMLTextAreaElement>("#export-output");
+const importInput = query<HTMLTextAreaElement>("#import-input");
+const importFileInput = query<HTMLInputElement>("#import-file-input");
+const importError = query<HTMLParagraphElement>("#import-error");
+const openImportModalButton = query<HTMLButtonElement>("#open-import-modal");
+const openExportModalButton = query<HTMLButtonElement>("#open-export-modal");
+const closeImportModalButton = query<HTMLButtonElement>("#close-import-modal");
+const closeExportModalButton = query<HTMLButtonElement>("#close-export-modal");
+const viewportWidthInput = query<HTMLInputElement>("#viewport-width");
+const viewportHeightInput = query<HTMLInputElement>("#viewport-height");
+const canvasSize = query<HTMLSpanElement>("#canvas-size");
+const addComponentButton = query<HTMLButtonElement>("#add-component-button");
+const exportModal = query<HTMLDivElement>("#export-modal");
+const importModal = query<HTMLDivElement>("#import-modal");
+const exportJsonPanel = query<HTMLDivElement>("#export-json-panel");
+const exportPngPanel = query<HTMLDivElement>("#export-png-panel");
+const exportFormatJson = query<HTMLInputElement>("#export-format-json");
+const exportFormatPng = query<HTMLInputElement>("#export-format-png");
+const applyImportButton = query<HTMLButtonElement>("#apply-import-button");
+const clearImportButton = query<HTMLButtonElement>("#clear-import-button");
+const copyExportButton = query<HTMLButtonElement>("#copy-export-button");
+const downloadJsonButton = query<HTMLButtonElement>("#download-json-button");
+const downloadPngButton = query<HTMLButtonElement>("#download-png-button");
+
+let dragging: { id: string; lastX: number; lastY: number } | null = null;
+let expandedMethodKey: string | null = null;
+
+function render(): void {
+  renderViewportControls();
+  renderCanvas();
+  renderComponentList();
+  renderSelectedPane();
+  exportOutput.value = store.exportJson();
+  syncExportModal();
+}
+
+function renderViewportControls(): void {
+  viewportWidthInput.value = String(store.spec.viewport.width);
+  viewportHeightInput.value = String(store.spec.viewport.height);
+  canvasSize.textContent = `${store.spec.viewport.width} x ${store.spec.viewport.height}`;
+  canvas.setAttribute("viewBox", `0 0 ${store.spec.viewport.width} ${store.spec.viewport.height}`);
+}
+
+function renderCanvas(): void {
+  const analysis = analyzeProjectDof(store.spec);
+  const horizontalBands: Array<{ y: number; start: number; end: number }> = [];
+  const verticalBands: Array<{ x: number; start: number; end: number }> = [];
+  canvas.innerHTML = "";
+
+  const background = createSvgElement("rect");
+  background.setAttribute("x", "0");
+  background.setAttribute("y", "0");
+  background.setAttribute("width", String(store.spec.viewport.width));
+  background.setAttribute("height", String(store.spec.viewport.height));
+  background.setAttribute("class", "canvas-background");
+  canvas.appendChild(background);
+  canvas.appendChild(createViewportOverlay());
+
+  for (const component of store.components) {
+    const report = analysis.components.find((item) => item.componentId === component.id);
+    canvas.appendChild(createComponentElement(component, report?.status === "under"));
+  }
+
+  for (const component of store.components) {
+    canvas.appendChild(createConstraintOverlay(component, horizontalBands, verticalBands));
+  }
+}
+
+function createViewportOverlay(): SVGGElement {
+  const { width, height } = store.spec.viewport;
+  const overlay = createSvgElement("g");
+  const border = createSvgElement("rect");
+  border.setAttribute("x", "0");
+  border.setAttribute("y", "0");
+  border.setAttribute("width", String(width));
+  border.setAttribute("height", String(height));
+  border.setAttribute("class", "viewport-boundary");
+  overlay.appendChild(border);
+  overlay.appendChild(createViewportLabel(16, 18, "viewport (0, 0)", "start"));
+  overlay.appendChild(createViewportLabel(width - 16, height - 12, `${width}, ${height}`, "end"));
+  return overlay;
+}
+
+function createComponentElement(component: ComponentNode, isUnderConstrained: boolean): SVGElement {
+  const { box } = component;
+  const selected = component.id === store.selectedId;
+  const element = createSvgElement(component.shape === "ellipse" ? "ellipse" : "rect");
+
+  if (element instanceof SVGEllipseElement) {
+    element.setAttribute("cx", String(box.x + box.width / 2));
+    element.setAttribute("cy", String(box.y + box.height / 2));
+    element.setAttribute("rx", String(box.width / 2));
+    element.setAttribute("ry", String(box.height / 2));
+  } else {
+    element.setAttribute("x", String(box.x));
+    element.setAttribute("y", String(box.y));
+    element.setAttribute("width", String(box.width));
+    element.setAttribute("height", String(box.height));
+  }
+
+  const classes = ["component"];
+  if (selected) classes.push("is-selected");
+  if (isUnderConstrained) classes.push("is-under");
+  element.setAttribute("class", classes.join(" "));
+  element.addEventListener("pointerdown", (event) => {
+    const pointerEvent = event as PointerEvent;
+    store.select(component.id);
+    dragging = { id: component.id, lastX: pointerEvent.clientX, lastY: pointerEvent.clientY };
+    canvas.setPointerCapture(pointerEvent.pointerId);
+    render();
+  });
+
+  return element;
+}
+
+function createConstraintOverlay(
+  component: ComponentNode,
+  horizontalBands: Array<{ y: number; start: number; end: number }>,
+  verticalBands: Array<{ x: number; start: number; end: number }>,
+): SVGGElement {
+  const overlay = createSvgElement("g");
+  overlay.setAttribute("class", "constraint-overlay");
+  const constraints = store.spec.constraints.filter((constraint) => constraint.componentId === component.id);
+  const usesCenter =
+    constraints.some(
+      (constraint) =>
+        constraint.kind === "centerX" ||
+        constraint.kind === "centerY" ||
+        constraint.sourceAnchor === "centerX" ||
+        constraint.sourceAnchor === "centerY",
+    ) ||
+    store.spec.constraints.some(
+      (constraint) =>
+        constraint.sourceComponentId === component.id &&
+        (constraint.sourceAnchor === "centerX" || constraint.sourceAnchor === "centerY"),
+    );
+
+  if (usesCenter) {
+    overlay.appendChild(createCenterCross(component));
+  }
+
+  const xPositionals = constraints.filter((constraint) => constraint.axis === "x" && constraint.kind !== "width" && constraint.kind !== "ratio");
+  const yPositionals = constraints.filter((constraint) => constraint.axis === "y" && constraint.kind !== "height" && constraint.kind !== "ratio");
+  const ratioConstraint = constraints.find((constraint) => constraint.kind === "ratio");
+
+  xPositionals.forEach((constraint, index) => {
+    overlay.appendChild(createHorizontalDimension(component, constraint, index, horizontalBands));
+  });
+
+  yPositionals.forEach((constraint, index) => {
+    overlay.appendChild(createVerticalDimension(component, constraint, index, verticalBands));
+  });
+
+  const widthConstraint = constraints.find((constraint) => constraint.axis === "x" && constraint.kind === "width");
+  if (widthConstraint) {
+    overlay.appendChild(createSizeDimension(component, widthConstraint, "x", horizontalBands, verticalBands));
+  }
+
+  const heightConstraint = constraints.find((constraint) => constraint.axis === "y" && constraint.kind === "height");
+  if (heightConstraint) {
+    overlay.appendChild(createSizeDimension(component, heightConstraint, "y", horizontalBands, verticalBands));
+  }
+
+  if (ratioConstraint) {
+    overlay.appendChild(createRatioOverlay(component));
+  }
+
+  return overlay;
+}
+
+function createHorizontalDimension(
+  component: ComponentNode,
+  constraint: ConstraintSpec,
+  index: number,
+  horizontalBands: Array<{ y: number; start: number; end: number }>,
+): SVGGElement {
+  const group = createSvgElement("g");
+  const initialTarget = getTargetAnchorPoint(component, constraint);
+  if (!initialTarget) return group;
+  const source = getSourceAnchorPoint(constraint, "x", initialTarget.y);
+  const target = getTargetAnchorPoint(component, constraint, source?.y);
+  if (!target || !source) return group;
+  if (Math.abs(source.x - target.x) < 0.5) {
+    group.appendChild(createAlignmentLine(source.x, source.y, target.x, target.y));
+    return group;
+  }
+
+  const proposedY = Math.min(source.y, target.y) - 22 - index * 20;
+  const y = reserveHorizontalBand(horizontalBands, proposedY, source.x, target.x);
+  group.appendChild(createExtensionLine(source.x, source.y, source.x, y));
+  group.appendChild(createExtensionLine(target.x, target.y, target.x, y));
+  group.appendChild(createHorizontalMeasuredLine(source.x, target.x, y, formatConstraintLabel(constraint)));
+  return group;
+}
+
+function createVerticalDimension(
+  component: ComponentNode,
+  constraint: ConstraintSpec,
+  index: number,
+  verticalBands: Array<{ x: number; start: number; end: number }>,
+): SVGGElement {
+  const group = createSvgElement("g");
+  const initialTarget = getTargetAnchorPoint(component, constraint);
+  if (!initialTarget) return group;
+  const source = getSourceAnchorPoint(constraint, "y", initialTarget.x);
+  const target = getTargetAnchorPoint(component, constraint, source?.x);
+  if (!target || !source) return group;
+  if (Math.abs(source.y - target.y) < 0.5) {
+    group.appendChild(createAlignmentLine(source.x, source.y, target.x, target.y));
+    return group;
+  }
+
+  const proposedX = Math.min(source.x, target.x) - 22 - index * 20;
+  const x = reserveVerticalBand(verticalBands, proposedX, source.y, target.y);
+  group.appendChild(createExtensionLine(source.x, source.y, x, source.y));
+  group.appendChild(createExtensionLine(target.x, target.y, x, target.y));
+  group.appendChild(createVerticalMeasuredLine(x, source.y, target.y, formatConstraintLabel(constraint)));
+  return group;
+}
+
+function createSizeDimension(
+  component: ComponentNode,
+  constraint: ConstraintSpec,
+  axis: AxisKind,
+  horizontalBands: Array<{ y: number; start: number; end: number }>,
+  verticalBands: Array<{ x: number; start: number; end: number }>,
+): SVGGElement {
+  const group = createSvgElement("g");
+
+  if (axis === "x") {
+    const left = getSizeAnchorPoint(component, "left", "x");
+    const right = getSizeAnchorPoint(component, "right", "x");
+    const proposedY = Math.max(left.y, right.y) + 24;
+    const y = reserveHorizontalBand(horizontalBands, proposedY, left.x, right.x);
+    group.appendChild(createExtensionLine(left.x, left.y, left.x, y));
+    group.appendChild(createExtensionLine(right.x, right.y, right.x, y));
+    group.appendChild(createHorizontalMeasuredLine(left.x, right.x, y, formatConstraintLabel(constraint)));
+    return group;
+  }
+
+  const top = getSizeAnchorPoint(component, "top", "y");
+  const bottom = getSizeAnchorPoint(component, "bottom", "y");
+  const proposedX = Math.max(top.x, bottom.x) + 24;
+  const x = reserveVerticalBand(verticalBands, proposedX, top.y, bottom.y);
+  group.appendChild(createExtensionLine(top.x, top.y, x, top.y));
+  group.appendChild(createExtensionLine(bottom.x, bottom.y, x, bottom.y));
+  group.appendChild(createVerticalMeasuredLine(x, top.y, bottom.y, formatConstraintLabel(constraint)));
+  return group;
+}
+
+function createCenterCross(component: ComponentNode): SVGGElement {
+  const group = createSvgElement("g");
+  const cx = component.box.x + component.box.width / 2;
+  const cy = component.box.y + component.box.height / 2;
+
+  group.appendChild(createExtensionLine(cx - 8, cy, cx + 8, cy));
+  group.appendChild(createExtensionLine(cx, cy - 8, cx, cy + 8));
+  return group;
+}
+
+function createRatioOverlay(component: ComponentNode): SVGGElement {
+  const group = createSvgElement("g");
+  const center = {
+    x: component.box.x + component.box.width / 2,
+    y: component.box.y + component.box.height / 2,
+  };
+  const corner = {
+    x: component.box.x + component.box.width,
+    y: component.box.y,
+  };
+
+  if (component.shape === "ellipse") {
+    const right = { x: component.box.x + component.box.width, y: center.y };
+    const top = { x: center.x, y: component.box.y };
+    group.appendChild(createRatioGuide(right.x, right.y, corner.x, corner.y));
+    group.appendChild(createRatioGuide(top.x, top.y, corner.x, corner.y));
+  }
+
+  group.appendChild(createRatioLine(center.x, center.y, corner.x, corner.y));
+  group.appendChild(
+    createRatioLabel(
+      center.x,
+      center.y,
+      corner.x,
+      corner.y,
+      formatRatioLabel(component.box.width, component.box.height),
+    ),
+  );
+  return group;
+}
+
+function createExtensionLine(x1: number, y1: number, x2: number, y2: number): SVGLineElement {
+  const line = createSvgElement("line");
+  line.setAttribute("x1", String(x1));
+  line.setAttribute("y1", String(y1));
+  line.setAttribute("x2", String(x2));
+  line.setAttribute("y2", String(y2));
+  line.setAttribute("class", "dimension-extension");
+  return line;
+}
+
+function createDimensionLine(x1: number, y1: number, x2: number, y2: number): SVGLineElement {
+  const line = createSvgElement("line");
+  line.setAttribute("x1", String(x1));
+  line.setAttribute("y1", String(y1));
+  line.setAttribute("x2", String(x2));
+  line.setAttribute("y2", String(y2));
+  line.setAttribute("class", "dimension-line");
+  return line;
+}
+
+function createAlignmentLine(x1: number, y1: number, x2: number, y2: number): SVGLineElement {
+  const line = createSvgElement("line");
+  line.setAttribute("x1", String(x1));
+  line.setAttribute("y1", String(y1));
+  line.setAttribute("x2", String(x2));
+  line.setAttribute("y2", String(y2));
+  line.setAttribute("class", "alignment-line");
+  return line;
+}
+
+function createRatioGuide(x1: number, y1: number, x2: number, y2: number): SVGLineElement {
+  const line = createSvgElement("line");
+  line.setAttribute("x1", String(x1));
+  line.setAttribute("y1", String(y1));
+  line.setAttribute("x2", String(x2));
+  line.setAttribute("y2", String(y2));
+  line.setAttribute("class", "ratio-guide");
+  return line;
+}
+
+function createRatioLine(x1: number, y1: number, x2: number, y2: number): SVGLineElement {
+  const line = createSvgElement("line");
+  line.setAttribute("x1", String(x1));
+  line.setAttribute("y1", String(y1));
+  line.setAttribute("x2", String(x2));
+  line.setAttribute("y2", String(y2));
+  line.setAttribute("class", "ratio-line");
+  return line;
+}
+
+function createRatioLabel(x1: number, y1: number, x2: number, y2: number, text: string): SVGTextElement {
+  const mx = (x1 + x2) / 2;
+  const my = (y1 + y2) / 2;
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+  const length = Math.hypot(dx, dy) || 1;
+  const nx = (-dy / length) * 10;
+  const ny = (dx / length) * 10;
+  const label = createSvgElement("text");
+  label.setAttribute("x", String(mx + nx));
+  label.setAttribute("y", String(my + ny));
+  label.setAttribute("text-anchor", "middle");
+  label.setAttribute("class", "ratio-label");
+  label.setAttribute("transform", `rotate(${angle} ${mx + nx} ${my + ny})`);
+  label.textContent = text;
+  return label;
+}
+
+function createDimensionLabel(x: number, y: number, text: string, rotate?: string): SVGTextElement {
+  const label = createSvgElement("text");
+  label.setAttribute("x", String(x));
+  label.setAttribute("y", String(y));
+  label.setAttribute("text-anchor", "middle");
+  label.setAttribute("class", "dimension-label");
+  label.textContent = text;
+  if (rotate) {
+    label.setAttribute("transform", `rotate(${rotate} ${x} ${y})`);
+  }
+  return label;
+}
+
+function getTargetAnchorPoint(
+  component: ComponentNode,
+  constraint: ConstraintSpec,
+  alignedCoordinate?: number,
+): { x: number; y: number } | null {
+  if (constraint.kind === "left") return getBoundaryAnchorPoint(component, "left", "x", alignedCoordinate);
+  if (constraint.kind === "right") return getBoundaryAnchorPoint(component, "right", "x", alignedCoordinate);
+  if (constraint.kind === "centerX") return getBoundaryAnchorPoint(component, "centerX", "x", alignedCoordinate);
+  if (constraint.kind === "top") return getBoundaryAnchorPoint(component, "top", "y", alignedCoordinate);
+  if (constraint.kind === "bottom") return getBoundaryAnchorPoint(component, "bottom", "y", alignedCoordinate);
+  if (constraint.kind === "centerY") return getBoundaryAnchorPoint(component, "centerY", "y", alignedCoordinate);
+  return null;
+}
+
+function getSourceAnchorPoint(
+  constraint: ConstraintSpec,
+  axis: AxisKind,
+  alignedCoordinate?: number,
+): { x: number; y: number } | null {
+  if (constraint.kind === "ratio") return null;
+  const source = constraint.sourceComponentId ? store.spec.components[constraint.sourceComponentId] : store.spec.components.root;
+  if (!source) return null;
+
+  if (source.id === "root") {
+    return getViewportAnchorPoint(constraint.sourceAnchor, axis, alignedCoordinate);
+  }
+
+  if (constraint.sourceAnchor === "left") return getBoundaryAnchorPoint(source, "left", "x", alignedCoordinate);
+  if (constraint.sourceAnchor === "right") return getBoundaryAnchorPoint(source, "right", "x", alignedCoordinate);
+  if (constraint.sourceAnchor === "centerX") return getBoundaryAnchorPoint(source, "centerX", "x", alignedCoordinate);
+  if (constraint.sourceAnchor === "top") return getBoundaryAnchorPoint(source, "top", "y", alignedCoordinate);
+  if (constraint.sourceAnchor === "bottom") return getBoundaryAnchorPoint(source, "bottom", "y", alignedCoordinate);
+  if (constraint.sourceAnchor === "centerY") return getBoundaryAnchorPoint(source, "centerY", "y", alignedCoordinate);
+  return null;
+}
+
+function getViewportAnchorPoint(
+  anchor: SourceAnchor,
+  axis: AxisKind,
+  alignedCoordinate?: number,
+): { x: number; y: number } | null {
+  if (axis === "x") {
+    const y = alignedCoordinate ?? store.spec.viewport.height / 2;
+    if (anchor === "left") return { x: 0, y };
+    if (anchor === "right") return { x: store.spec.viewport.width, y };
+    if (anchor === "centerX") return { x: store.spec.viewport.width / 2, y };
+  }
+
+  if (axis === "y") {
+    const x = alignedCoordinate ?? store.spec.viewport.width / 2;
+    if (anchor === "top") return { x, y: 0 };
+    if (anchor === "bottom") return { x, y: store.spec.viewport.height };
+    if (anchor === "centerY") return { x, y: store.spec.viewport.height / 2 };
+  }
+
+  return null;
+}
+
+function getBoundaryAnchorPoint(
+  component: ComponentNode,
+  anchor: "left" | "right" | "centerX" | "top" | "bottom" | "centerY",
+  axis: AxisKind,
+  alignedCoordinate?: number,
+): { x: number; y: number } {
+  const cx = component.box.x + component.box.width / 2;
+  const cy = component.box.y + component.box.height / 2;
+
+  if (component.shape === "ellipse") {
+    if (axis === "x") {
+      if (anchor === "left") return { x: component.box.x, y: cy };
+      if (anchor === "right") return { x: component.box.x + component.box.width, y: cy };
+      return { x: cx, y: cy };
+    }
+
+    if (anchor === "top") return { x: cx, y: component.box.y };
+    if (anchor === "bottom") return { x: cx, y: component.box.y + component.box.height };
+    return { x: cx, y: cy };
+  }
+
+  if (axis === "x") {
+    const y = clamp(alignedCoordinate ?? cy, component.box.y, component.box.y + component.box.height);
+    if (anchor === "left") return { x: component.box.x, y };
+    if (anchor === "right") return { x: component.box.x + component.box.width, y };
+    return { x: cx, y };
+  }
+
+  const x = clamp(alignedCoordinate ?? cx, component.box.x, component.box.x + component.box.width);
+  if (anchor === "top") return { x, y: component.box.y };
+  if (anchor === "bottom") return { x, y: component.box.y + component.box.height };
+  return { x, y: cy };
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getSizeAnchorPoint(
+  component: ComponentNode,
+  anchor: "left" | "right" | "top" | "bottom",
+  axis: AxisKind,
+): { x: number; y: number } {
+  if (component.shape === "ellipse") {
+    const cx = component.box.x + component.box.width / 2;
+    const cy = component.box.y + component.box.height / 2;
+    if (anchor === "left") return { x: component.box.x, y: cy };
+    if (anchor === "right") return { x: component.box.x + component.box.width, y: cy };
+    if (anchor === "top") return { x: cx, y: component.box.y };
+      return { x: cx, y: component.box.y + component.box.height };
+    }
+  if (axis === "x") {
+    if (anchor === "left") return { x: component.box.x, y: component.box.y + component.box.height };
+    return { x: component.box.x + component.box.width, y: component.box.y + component.box.height };
+  }
+  if (anchor === "top") return { x: component.box.x + component.box.width, y: component.box.y };
+  return { x: component.box.x + component.box.width, y: component.box.y + component.box.height };
+}
+
+function createHorizontalMeasuredLine(x1: number, x2: number, y: number, label: string): SVGGElement {
+  const group = createSvgElement("g");
+  const left = Math.min(x1, x2);
+  const right = Math.max(x1, x2);
+  const distance = right - left;
+  const labelWidth = estimateLabelWidth(label);
+  const inner = distance >= labelWidth + 20;
+
+  group.appendChild(createDimensionLine(left, y, right, y));
+  group.appendChild(createEndBar(left, y, "vertical"));
+  group.appendChild(createEndBar(right, y, "vertical"));
+
+  if (inner) {
+    group.appendChild(createArrowHead(left, y, "left"));
+    group.appendChild(createArrowHead(right, y, "right"));
+    group.appendChild(createDimensionLabel((left + right) / 2, y - 6, label));
+  } else {
+    group.appendChild(createArrowHead(left, y, "right"));
+    group.appendChild(createArrowHead(right, y, "left"));
+    group.appendChild(createDimensionLabel(right + labelWidth / 2 + 12, y - 6, label));
+  }
+
+  return group;
+}
+
+function createVerticalMeasuredLine(x: number, y1: number, y2: number, label: string): SVGGElement {
+  const group = createSvgElement("g");
+  const top = Math.min(y1, y2);
+  const bottom = Math.max(y1, y2);
+  const distance = bottom - top;
+  const labelHeight = estimateLabelWidth(label);
+  const inner = distance >= labelHeight + 20;
+
+  group.appendChild(createDimensionLine(x, top, x, bottom));
+  group.appendChild(createEndBar(x, top, "horizontal"));
+  group.appendChild(createEndBar(x, bottom, "horizontal"));
+
+  if (inner) {
+    group.appendChild(createArrowHead(x, top, "up"));
+    group.appendChild(createArrowHead(x, bottom, "down"));
+    group.appendChild(createDimensionLabel(x - 8, (top + bottom) / 2, label, "-90"));
+  } else {
+    group.appendChild(createArrowHead(x, top, "down"));
+    group.appendChild(createArrowHead(x, bottom, "up"));
+    group.appendChild(createDimensionLabel(x - 10, bottom + labelHeight / 2 + 12, label, "-90"));
+  }
+
+  return group;
+}
+
+function createEndBar(x: number, y: number, orientation: "vertical" | "horizontal"): SVGLineElement {
+  if (orientation === "vertical") {
+    return createDimensionLine(x, y - 6, x, y + 6);
+  }
+  return createDimensionLine(x - 6, y, x + 6, y);
+}
+
+function createArrowHead(x: number, y: number, direction: "left" | "right" | "up" | "down"): SVGPathElement {
+  const path = createSvgElement("path");
+  const size = 5;
+  let d = "";
+  if (direction === "left") d = `M ${x} ${y} L ${x + size} ${y - size / 2} L ${x + size} ${y + size / 2} Z`;
+  if (direction === "right") d = `M ${x} ${y} L ${x - size} ${y - size / 2} L ${x - size} ${y + size / 2} Z`;
+  if (direction === "up") d = `M ${x} ${y} L ${x - size / 2} ${y + size} L ${x + size / 2} ${y + size} Z`;
+  if (direction === "down") d = `M ${x} ${y} L ${x - size / 2} ${y - size} L ${x + size / 2} ${y - size} Z`;
+  path.setAttribute("d", d);
+  path.setAttribute("class", "dimension-arrow");
+  return path;
+}
+
+function estimateLabelWidth(text: string): number {
+  return Math.max(24, text.length * 6);
+}
+
+function reserveHorizontalBand(
+  bands: Array<{ y: number; start: number; end: number }>,
+  proposedY: number,
+  x1: number,
+  x2: number,
+): number {
+  const start = Math.min(x1, x2);
+  const end = Math.max(x1, x2);
+  let y = proposedY;
+  while (
+    bands.some(
+      (band) =>
+        Math.abs(band.y - y) < 14 &&
+        !(end < band.start - 6 || start > band.end + 6),
+    )
+  ) {
+    y -= 16;
+  }
+  bands.push({ y, start, end });
+  return y;
+}
+
+function reserveVerticalBand(
+  bands: Array<{ x: number; start: number; end: number }>,
+  proposedX: number,
+  y1: number,
+  y2: number,
+): number {
+  const start = Math.min(y1, y2);
+  const end = Math.max(y1, y2);
+  let x = proposedX;
+  while (
+    bands.some(
+      (band) =>
+        Math.abs(band.x - x) < 14 &&
+        !(end < band.start - 6 || start > band.end + 6),
+    )
+  ) {
+    x += 16;
+  }
+  bands.push({ x, start, end });
+  return x;
+}
+
+function formatConstraintLabel(constraint: ConstraintSpec): string {
+  if (constraint.unit === "percent") {
+    return `${Math.abs(constraint.value)}%`;
+  }
+  return `${Math.abs(constraint.value)}px`;
+}
+
+function formatRatioLabel(width: number, height: number): string {
+  const w = Math.max(1, Math.round(Math.abs(width)));
+  const h = Math.max(1, Math.round(Math.abs(height)));
+  const divisor = gcd(w, h);
+  const reducedW = w / divisor;
+  const reducedH = h / divisor;
+  const smaller = Math.min(reducedW, reducedH);
+
+  if (smaller <= 20) {
+    return `${reducedW}:${reducedH}`;
+  }
+
+  const ratio = w / h;
+  if (ratio >= 1000) return "1:0";
+  if (ratio <= 0.001) return "0:1";
+  if (ratio >= 1) return `${trimRatio(ratio)}:1`;
+  return `1:${trimRatio(1 / ratio)}`;
+}
+
+function trimRatio(value: number): string {
+  return value.toFixed(3).replace(/\.?0+$/, "");
+}
+
+function formatRatioParts(ratio: number): { w: number; h: number } {
+  const absolute = Math.abs(ratio || 1);
+  if (absolute >= 1000) return { w: 1, h: 0 };
+  if (absolute <= 0.001) return { w: 0, h: 1 };
+
+  const scaledW = Math.max(1, Math.round(absolute * 1000));
+  const scaledH = 1000;
+  const divisor = gcd(scaledW, scaledH);
+  return { w: scaledW / divisor, h: scaledH / divisor };
+}
+
+function parseRatioParts(wInput: string, hInput: string): number {
+  const left = Number(wInput);
+  const right = Number(hInput);
+  if (!Number.isFinite(left) || !Number.isFinite(right) || left < 0 || right < 0) {
+    return 1;
+  }
+  if (right === 0) return 1000;
+  if (left === 0) return 0.001;
+  return left / right;
+}
+
+function gcd(a: number, b: number): number {
+  let x = Math.abs(a);
+  let y = Math.abs(b);
+  while (y !== 0) {
+    const next = x % y;
+    x = y;
+    y = next;
+  }
+  return x || 1;
+}
+
+function renderComponentList(): void {
+  const analysis = analyzeProjectDof(store.spec);
+  componentList.innerHTML = "";
+
+  for (const component of store.components) {
+    const report = analysis.components.find((item) => item.componentId === component.id);
+    if (!report) continue;
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = [
+      "component-row",
+      component.id === store.selectedId ? "is-selected" : "",
+      report.status === "under" ? "is-under" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    button.innerHTML = `
+      <strong>${component.name}</strong>
+      <span class="row-meta">${getShapeLabel(component.shape)}</span>
+    `;
+    button.addEventListener("click", () => {
+      store.select(component.id);
+      render();
+    });
+    componentList.appendChild(button);
+  }
+}
+
+function renderSelectedPane(): void {
+  const selected = store.selectedId ? store.spec.components[store.selectedId] : null;
+  if (!selected) {
+    selectedPane.textContent = "No component selected";
+    return;
+  }
+
+  const analysis = analyzeProjectDof(store.spec);
+  const report = analysis.components.find((item) => item.componentId === selected.id);
+  const xStatus = report?.axes.find((axis) => axis.axis === "x");
+  const yStatus = report?.axes.find((axis) => axis.axis === "y");
+
+  selectedPane.innerHTML = `
+    <div class="selected-head">
+      <div>
+        <strong>${selected.name}</strong>
+        <p class="row-meta">${getShapeLabel(selected.shape)}</p>
+      </div>
+      <span class="status-chip is-${report?.status ?? "under"}">${formatStatus(report?.status ?? "under")}</span>
+    </div>
+    <div class="field-grid">
+      <label class="field">
+        <span>Name</span>
+        <input id="selected-name" type="text" value="${escapeAttribute(selected.name)}" />
+      </label>
+      <label class="field">
+        <span>Shape</span>
+        <select id="selected-shape">
+          <option value="rect" ${selected.shape === "rect" ? "selected" : ""}>Rectangle</option>
+          <option value="ellipse" ${selected.shape === "ellipse" ? "selected" : ""}>Ellipse</option>
+        </select>
+      </label>
+    </div>
+    <div class="axis-summary">
+      <div class="axis-pill is-${xStatus?.status ?? "under"}">x: ${xStatus?.usedKinds.length ?? 0}/2</div>
+      <div class="axis-pill is-${yStatus?.status ?? "under"}">y: ${yStatus?.usedKinds.length ?? 0}/2</div>
+    </div>
+    <div class="constraint-editor">
+      ${renderAxisEditor(selected.id, "x")}
+      ${renderAxisEditor(selected.id, "y")}
+    </div>
+    <button id="delete-component-button" type="button">Delete Component</button>
+  `;
+
+  bindSelectedInputs();
+  bindConstraintEditors(selected.id);
+}
+
+function renderAxisEditor(componentId: string, axis: AxisKind): string {
+  const current = store.spec.constraints.filter((constraint) => constraint.componentId === componentId && constraint.axis === axis);
+  const currentKinds = new Set(current.map((constraint) => constraint.kind));
+  const available = getAvailableKinds(axis);
+  const oppositeAxis = axis === "x" ? "y" : "x";
+  const ratioUsedOnOtherAxis = store.spec.constraints.some(
+    (constraint) => constraint.componentId === componentId && constraint.axis === oppositeAxis && constraint.kind === "ratio",
+  );
+  const title = axis === "x" ? "Horizontal constraints" : "Vertical constraints";
+  const helper = axis === "x"
+    ? "Need exactly 2: left / right / width / ratio / centerX"
+    : "Need exactly 2: top / bottom / height / ratio / centerY";
+  const axisFull = currentKinds.size >= 2;
+
+  return `
+    <section class="axis-editor">
+      <div class="axis-editor-head">
+        <strong>${title}</strong>
+        <span>${currentKinds.size}/2 active</span>
+      </div>
+      <p class="hint">${helper}</p>
+      <div class="method-list">
+        ${available
+          .map((kind) =>
+            renderConstraintMethod(
+              componentId,
+              axis,
+              kind,
+              current.find((constraint) => constraint.kind === kind),
+              kind === "ratio" && ratioUsedOnOtherAxis,
+              axisFull,
+            ),
+          )
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderConstraintMethod(
+  componentId: string,
+  axis: AxisKind,
+  kind: ConstraintKind,
+  constraint?: ConstraintSpec,
+  ratioLocked = false,
+  axisFull = false,
+): string {
+  const enabled = Boolean(constraint);
+  const isRatio = kind === "ratio";
+  const methodKey = getMethodKey(componentId, axis, kind);
+  const expanded = enabled && expandedMethodKey === methodKey;
+  const disabled = !enabled && (ratioLocked || axisFull);
+  const sourceValue = constraint?.sourceComponentId ?? "viewport";
+  const anchorOptions = getAnchorOptions(axis, kind, sourceValue === "viewport")
+    .map((anchor) => `<option value="${anchor}" ${constraint?.sourceAnchor === anchor ? "selected" : ""}>${formatAnchor(anchor)}</option>`)
+    .join("");
+  const isSizeOnly = kind === "width" || kind === "height";
+  const fields = isRatio
+      ? `
+          <div class="method-fields" ${expanded ? "" : "hidden"}>
+            <div class="field-grid ratio-only-grid">
+            <label class="field">
+              <span>w</span>
+              <input
+                data-role="ratio-w"
+                data-component="${componentId}"
+                data-axis="${axis}"
+                data-kind="${kind}"
+                type="number"
+                min="0"
+                step="1"
+                value="${(constraint?.ratioParts ?? formatRatioParts(constraint?.value ?? 1)).w}"
+              />
+            </label>
+            <label class="field">
+              <span>h</span>
+              <input
+                data-role="ratio-h"
+                data-component="${componentId}"
+                data-axis="${axis}"
+                data-kind="${kind}"
+                type="number"
+                min="0"
+                step="1"
+                value="${(constraint?.ratioParts ?? formatRatioParts(constraint?.value ?? 1)).h}"
+              />
+            </label>
+            </div>
+          </div>
+        `
+      : isSizeOnly
+        ? `
+          <div class="method-fields" ${expanded ? "" : "hidden"}>
+            <div class="field-grid">
+              <label class="field">
+                <span>Value</span>
+                <input
+                  data-role="value"
+                  data-component="${componentId}"
+                  data-axis="${axis}"
+                  data-kind="${kind}"
+                  type="number"
+                  step="1"
+                  value="${constraint?.value ?? 0}"
+                />
+              </label>
+              <label class="field">
+                <span>Unit</span>
+                <select data-role="unit" data-component="${componentId}" data-axis="${axis}" data-kind="${kind}">
+                  <option value="px" ${constraint?.unit === "px" ? "selected" : ""}>px</option>
+                  <option value="percent" ${constraint?.unit === "percent" ? "selected" : ""}>%</option>
+                </select>
+              </label>
+            </div>
+          </div>
+        `
+      : `
+          <div class="method-fields" ${expanded ? "" : "hidden"}>
+          <div class="field-grid">
+            <label class="field">
+              <span>Target</span>
+              <select data-role="source" data-component="${componentId}" data-axis="${axis}" data-kind="${kind}">
+                ${buildSourceOptions(componentId, sourceValue)}
+              </select>
+            </label>
+            <label class="field">
+              <span>Reference</span>
+              <select data-role="anchor" data-component="${componentId}" data-axis="${axis}" data-kind="${kind}">
+                ${anchorOptions}
+              </select>
+            </label>
+          </div>
+          <div class="field-grid">
+            <label class="field">
+              <span>Value</span>
+              <input
+                data-role="value"
+                data-component="${componentId}"
+                data-axis="${axis}"
+                data-kind="${kind}"
+                type="number"
+                step="1"
+                value="${constraint?.value ?? 0}"
+              />
+            </label>
+            <label class="field">
+              <span>Unit</span>
+              <select data-role="unit" data-component="${componentId}" data-axis="${axis}" data-kind="${kind}">
+                <option value="px" ${constraint?.unit === "px" ? "selected" : ""}>px</option>
+                <option value="percent" ${constraint?.unit === "percent" ? "selected" : ""}>%</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      `;
+
+  return `
+    <div class="method-card ${enabled ? "is-enabled" : ""} ${expanded ? "is-expanded" : ""}" data-method-card="${methodKey}">
+      <label class="method-toggle" data-method-head="${methodKey}">
+        <input
+          type="checkbox"
+          data-role="toggle"
+          data-component="${componentId}"
+          data-axis="${axis}"
+          data-kind="${kind}"
+          ${enabled ? "checked" : ""}
+          ${disabled ? "disabled" : ""}
+        />
+        <span>${kind}</span>
+      </label>
+      ${enabled ? fields : ""}
+    </div>
+  `;
+}
+
+function buildSourceOptions(componentId: string, selectedValue: string): string {
+  return [`<option value="viewport" ${selectedValue === "viewport" ? "selected" : ""}>Viewport</option>`]
+    .concat(
+      store.components
+        .filter((component) => component.id !== componentId)
+        .map((component) => `<option value="${component.id}" ${selectedValue === component.id ? "selected" : ""}>${component.name}</option>`),
+    )
+    .join("");
+}
+
+function getAnchorOptions(axis: AxisKind, kind: ConstraintKind, isViewport: boolean): SourceAnchor[] {
+  if (kind === "ratio") return ["ratio"];
+  if (isViewport) return axis === "x" ? ["left", "right", "centerX"] : ["top", "bottom", "centerY"];
+  return axis === "x" ? ["left", "right", "centerX"] : ["top", "bottom", "centerY"];
+}
+
+function bindSelectedInputs(): void {
+  queryWithin<HTMLInputElement>(selectedPane, "#selected-name").addEventListener("input", (event) => {
+    store.updateSelectedName((event.target as HTMLInputElement).value.trim());
+    render();
+  });
+
+  queryWithin<HTMLSelectElement>(selectedPane, "#selected-shape").addEventListener("change", (event) => {
+    store.updateSelectedShape((event.target as HTMLSelectElement).value as ComponentNode["shape"]);
+    render();
+  });
+
+  queryWithin<HTMLButtonElement>(selectedPane, "#delete-component-button").addEventListener("click", () => {
+    store.deleteSelectedComponent();
+    render();
+  });
+}
+
+function bindConstraintEditors(componentId: string): void {
+  for (const head of selectedPane.querySelectorAll<HTMLElement>("[data-method-head]")) {
+    head.addEventListener("click", (event) => {
+      const target = event.target as HTMLElement;
+      if (target instanceof HTMLInputElement) return;
+      const key = head.dataset.methodHead ?? null;
+      if (!key) return;
+      expandedMethodKey = expandedMethodKey === key ? null : key;
+      render();
+    });
+  }
+
+  for (const checkbox of selectedPane.querySelectorAll<HTMLInputElement>('input[data-role="toggle"]')) {
+    checkbox.addEventListener("change", () => {
+      const axis = checkbox.dataset.axis as AxisKind;
+      const kind = checkbox.dataset.kind as ConstraintKind;
+      const methodKey = getMethodKey(componentId, axis, kind);
+      if (checkbox.checked) {
+        store.activateConstraint(componentId, axis, kind);
+        expandedMethodKey = methodKey;
+      } else {
+        store.removeConstraintByKind(componentId, axis, kind);
+        if (expandedMethodKey === methodKey) {
+          expandedMethodKey = null;
+        }
+      }
+      render();
+    });
+  }
+
+  for (const field of selectedPane.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-role]")) {
+    const role = field.dataset.role;
+    if (!role || role === "toggle") continue;
+    field.addEventListener("input", () => updateConstraintFromRow(componentId, field));
+    field.addEventListener("change", () => updateConstraintFromRow(componentId, field));
+  }
+}
+
+function updateConstraintFromRow(componentId: string, element: HTMLInputElement | HTMLSelectElement): void {
+  const axis = element.dataset.axis as AxisKind;
+  const kind = element.dataset.kind as ConstraintKind;
+  expandedMethodKey = getMethodKey(componentId, axis, kind);
+  const source = selectedPane.querySelector<HTMLSelectElement>(`[data-role="source"][data-axis="${axis}"][data-kind="${kind}"]`);
+  const anchor = selectedPane.querySelector<HTMLSelectElement>(`[data-role="anchor"][data-axis="${axis}"][data-kind="${kind}"]`);
+  const unit = selectedPane.querySelector<HTMLSelectElement>(`[data-role="unit"][data-axis="${axis}"][data-kind="${kind}"]`);
+  const value = selectedPane.querySelector<HTMLInputElement>(`[data-role="value"][data-axis="${axis}"][data-kind="${kind}"]`);
+  const ratioW = selectedPane.querySelector<HTMLInputElement>(`[data-role="ratio-w"][data-axis="${axis}"][data-kind="${kind}"]`);
+  const ratioH = selectedPane.querySelector<HTMLInputElement>(`[data-role="ratio-h"][data-axis="${axis}"][data-kind="${kind}"]`);
+  const sourceComponentId = kind === "ratio" ? componentId : source && source.value !== "viewport" ? source.value : null;
+  const sourceAnchor = kind === "ratio" ? "ratio" : ((anchor?.value ?? getDefaultAnchor(axis, kind)) as SourceAnchor);
+  const resolvedUnit = kind === "ratio" ? "ratio" : ((unit?.value ?? "px") as UnitKind);
+  const resolvedValue =
+    kind === "ratio"
+      ? parseRatioParts(ratioW?.value ?? "1", ratioH?.value ?? "1")
+      : Number(value?.value ?? 0);
+  const ratioParts =
+    kind === "ratio"
+      ? {
+          w: Math.max(0, Number(ratioW?.value ?? "1")) || 0,
+          h: Math.max(0, Number(ratioH?.value ?? "1")) || 0,
+        }
+      : undefined;
+
+  if (kind !== "ratio" && (element.dataset.role === "source" || element.dataset.role === "anchor" || element.dataset.role === "unit")) {
+    const measured = store.measureDraftConstraint({
+      componentId,
+      axis,
+      kind,
+      sourceComponentId,
+      sourceAnchor,
+      unit: resolvedUnit,
+      });
+      if (measured !== null && Number.isFinite(measured)) {
+        if (value) {
+          value.value = String(measured);
+        }
+      }
+    }
+
+  store.upsertConstraint({
+    componentId,
+    axis,
+    kind,
+    sourceComponentId,
+    sourceAnchor,
+    value: resolvedValue,
+    unit: resolvedUnit,
+    ratioParts,
+  });
+
+  render();
+}
+
+function getDefaultAnchor(axis: AxisKind, kind: ConstraintKind): SourceAnchor {
+  if (kind === "ratio") return "ratio";
+  return axis === "x" ? "left" : "top";
+}
+
+function formatAnchor(anchor: SourceAnchor): string {
+  if (anchor === "ratio") return "self other axis";
+  return anchor;
+}
+
+function getMethodKey(componentId: string, axis: AxisKind, kind: ConstraintKind): string {
+  return `${componentId}:${axis}:${kind}`;
+}
+
+addComponentButton.addEventListener("click", () => {
+  store.addComponent("rect");
+  render();
+});
+
+viewportWidthInput.addEventListener("input", () => {
+  store.resizeViewport(Number(viewportWidthInput.value), store.spec.viewport.height);
+  render();
+});
+
+viewportHeightInput.addEventListener("input", () => {
+  store.resizeViewport(store.spec.viewport.width, Number(viewportHeightInput.value));
+  render();
+});
+
+canvas.addEventListener("pointermove", (event) => {
+  if (!dragging) return;
+  const dx = event.clientX - dragging.lastX;
+  const dy = event.clientY - dragging.lastY;
+  dragging.lastX = event.clientX;
+  dragging.lastY = event.clientY;
+  store.moveSelected(dx, dy);
+  render();
+});
+
+canvas.addEventListener("pointerup", () => {
+  dragging = null;
+});
+
+openExportModalButton.addEventListener("click", () => {
+  exportModal.hidden = false;
+  syncExportModal();
+});
+
+openImportModalButton.addEventListener("click", () => {
+  importModal.hidden = false;
+  clearImportFeedback();
+});
+
+closeExportModalButton.addEventListener("click", () => {
+  exportModal.hidden = true;
+});
+
+closeImportModalButton.addEventListener("click", () => {
+  importModal.hidden = true;
+});
+
+for (const closeTarget of document.querySelectorAll<HTMLElement>("[data-close-export-modal='true']")) {
+  closeTarget.addEventListener("click", () => {
+    exportModal.hidden = true;
+  });
+}
+
+for (const closeTarget of document.querySelectorAll<HTMLElement>("[data-close-import-modal='true']")) {
+  closeTarget.addEventListener("click", () => {
+    importModal.hidden = true;
+  });
+}
+
+exportFormatJson.addEventListener("change", syncExportModal);
+exportFormatPng.addEventListener("change", syncExportModal);
+
+importFileInput.addEventListener("change", async () => {
+  clearImportFeedback();
+  const file = importFileInput.files?.[0];
+  if (!file) return;
+  try {
+    importInput.value = await file.text();
+  } catch {
+    showImportError("Failed to read the selected file.");
+  }
+});
+
+clearImportButton.addEventListener("click", () => {
+  importInput.value = "";
+  importFileInput.value = "";
+  clearImportFeedback();
+});
+
+applyImportButton.addEventListener("click", () => {
+  clearImportFeedback();
+  const raw = importInput.value.trim();
+  if (!raw) {
+    showImportError("Paste JSON or choose a JSON file first.");
+    return;
+  }
+
+  try {
+    store.importJson(raw);
+    expandedMethodKey = null;
+    importModal.hidden = true;
+    render();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Import failed.";
+    showImportError(message);
+  }
+});
+
+copyExportButton.addEventListener("click", async () => {
+  exportOutput.select();
+  try {
+    await navigator.clipboard.writeText(exportOutput.value);
+  } catch {
+    document.execCommand("copy");
+  }
+});
+
+downloadJsonButton.addEventListener("click", () => {
+  const blob = new Blob([exportOutput.value], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "ui-spec-editor.json";
+  link.click();
+  URL.revokeObjectURL(url);
+});
+
+downloadPngButton.addEventListener("click", async () => {
+  const blob = await exportCanvasToPng(canvas);
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "ui-spec-editor.png";
+  link.click();
+  URL.revokeObjectURL(url);
+});
+
+function query<T extends Element>(selector: string): T {
+  const element = document.querySelector<T>(selector);
+  if (!element) throw new Error(`Missing element: ${selector}`);
+  return element;
+}
+
+function queryWithin<T extends Element>(root: Element, selector: string): T {
+  const element = root.querySelector<T>(selector);
+  if (!element) throw new Error(`Missing element: ${selector}`);
+  return element;
+}
+
+function createSvgElement<K extends keyof SVGElementTagNameMap>(tagName: K): SVGElementTagNameMap[K] {
+  return document.createElementNS("http://www.w3.org/2000/svg", tagName);
+}
+
+function createViewportLabel(x: number, y: number, text: string, anchor: "start" | "middle" | "end"): SVGTextElement {
+  const label = createSvgElement("text");
+  label.setAttribute("x", String(x));
+  label.setAttribute("y", String(y));
+  label.setAttribute("text-anchor", anchor);
+  label.setAttribute("class", "viewport-label");
+  label.textContent = text;
+  return label;
+}
+
+function formatStatus(status: "under" | "full" | "over"): string {
+  if (status === "under") return "Missing";
+  if (status === "over") return "Over";
+  return "Ready";
+}
+
+function escapeAttribute(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+}
+
+function syncExportModal(): void {
+  exportOutput.value = store.exportJson();
+  exportOutput.readOnly = true;
+  const jsonMode = exportFormatJson.checked;
+  exportJsonPanel.hidden = !jsonMode;
+  exportPngPanel.hidden = jsonMode;
+}
+
+function clearImportFeedback(): void {
+  importError.hidden = true;
+  importError.textContent = "";
+}
+
+function showImportError(message: string): void {
+  importError.hidden = false;
+  importError.textContent = message;
+}
+
+async function exportCanvasToPng(svg: SVGSVGElement): Promise<Blob> {
+  const serializer = new XMLSerializer();
+  const clone = svg.cloneNode(true) as SVGSVGElement;
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  const svgString = serializer.serializeToString(clone);
+  const svgBlob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(svgBlob);
+  const image = new Image();
+  image.decoding = "async";
+
+  await new Promise<void>((resolve, reject) => {
+    image.onload = () => resolve();
+    image.onerror = () => reject(new Error("PNG export failed"));
+    image.src = url;
+  });
+
+  const rect = svg.viewBox.baseVal;
+  const canvasEl = document.createElement("canvas");
+  canvasEl.width = rect.width;
+  canvasEl.height = rect.height;
+  const context = canvasEl.getContext("2d");
+  if (!context) {
+    URL.revokeObjectURL(url);
+    throw new Error("Canvas context unavailable");
+  }
+
+  context.drawImage(image, 0, 0, rect.width, rect.height);
+  URL.revokeObjectURL(url);
+
+  return await new Promise<Blob>((resolve, reject) => {
+    canvasEl.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error("PNG export failed"));
+    }, "image/png");
+  });
+}
+
+render();

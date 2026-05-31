@@ -1,0 +1,16 @@
+
+# node / vite / typescript
+node_modules/
+dist/
+.vite/
+vite.config.ts.timestamp-*
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+
+# logs
+.log*
+
+# editor / os
+.DS_Store
+Thumbs.db
