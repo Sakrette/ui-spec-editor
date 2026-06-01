@@ -156,6 +156,8 @@ const ANNOTATION_LINE_GAP = 3 * 1.5;
 let dragging: DragState | null = null;
 let expandedMethodKey: string | null = null;
 let hoveredControlKey: string | null = null;
+let hoveredComponentId: string | null = null;
+let hoveredPreviewHandle: ControlHandle | null = null;
 
 function render(): void {
   renderViewportControls();
@@ -203,8 +205,21 @@ function renderCanvas(): void {
   }
 
   const selected = store.selectedId ? store.spec.components[store.selectedId] : null;
-  if (selected && selected.id !== "root") {
-    canvas.appendChild(createResizeHandles(selected));
+  if (selected && selected.shape === "ellipse") {
+    const ellipsePreview = createSvgElement("g");
+    ellipsePreview.setAttribute("data-component-id", selected.id);
+    ellipsePreview.setAttribute("data-preserve-selection", "true");
+    ellipsePreview.appendChild(createHandleOutline(selected.box));
+    ellipsePreview.appendChild(createHandleOutlineHit(selected.box, selected.id));
+    canvas.appendChild(ellipsePreview);
+  }
+
+  const previewComponentId = getPreviewComponentId();
+  if (previewComponentId) {
+    const previewComponent = store.spec.components[previewComponentId];
+    if (previewComponent && previewComponent.id !== "root") {
+      canvas.appendChild(createResizeHandles(previewComponent, true, getPreviewHandleForRender()));
+    }
   }
 }
 
@@ -245,6 +260,7 @@ function createComponentElement(component: ComponentNode, isUnderConstrained: bo
   if (isUnderConstrained) classes.push("is-under");
   element.setAttribute("class", classes.join(" "));
   element.setAttribute("data-preserve-selection", "true");
+  element.setAttribute("data-component-id", component.id);
   element.addEventListener("pointerdown", (event) => {
     const pointerEvent = event as PointerEvent;
     pointerEvent.stopPropagation();
@@ -264,20 +280,21 @@ function createComponentElement(component: ComponentNode, isUnderConstrained: bo
   return element;
 }
 
-function createResizeHandles(component: ComponentNode): SVGGElement {
+function createResizeHandles(component: ComponentNode, preview = false, previewHandle: ControlHandle | null = null): SVGGElement {
   const group = createSvgElement("g");
   group.setAttribute("class", "resize-handles");
   group.setAttribute("data-preserve-selection", "true");
+  group.setAttribute("data-component-id", component.id);
   const ratioLocked = hasLockedRatioConstraint(component.id);
   const xLocked = ratioLocked || hasLockedAxisConstraint(component.id, "x");
   const yLocked = ratioLocked || hasLockedAxisConstraint(component.id, "y");
 
-  if (component.shape === "ellipse") {
+  if (component.shape === "ellipse" && !preview) {
     group.appendChild(createHandleOutline(component.box));
   }
 
   for (const { handle, x, y, cursor } of getResizeHandlePoints(component.box)) {
-    if (isResizeHandleHidden(handle, xLocked, yLocked)) continue;
+    if (isResizeHandleHidden(handle, xLocked, yLocked, preview, previewHandle)) continue;
     const key = getHandleControlKey(component.id, handle);
     if (shouldHideOtherControls(key)) continue;
     const node = createControlHandle(component, handle, x, y, cursor);
@@ -299,7 +316,16 @@ function hasLockedRatioConstraint(componentId: string): boolean {
   );
 }
 
-function isResizeHandleHidden(handle: ControlHandle, xLocked: boolean, yLocked: boolean): boolean {
+function isResizeHandleHidden(
+  handle: ControlHandle,
+  xLocked: boolean,
+  yLocked: boolean,
+  preview: boolean,
+  previewHandle: ControlHandle | null = null,
+): boolean {
+  if (preview) {
+    return handle !== previewHandle;
+  }
   if (handle === "move") return xLocked && yLocked;
   if (xLocked && ["e", "w", "ne", "nw", "se", "sw"].includes(handle)) return true;
   if (yLocked && ["n", "s", "ne", "nw", "se", "sw"].includes(handle)) return true;
@@ -1068,13 +1094,98 @@ function getResizeHandlePoints(box: Box): Array<{ handle: ControlHandle; x: numb
   ];
 }
 
-function getCanvasDelta(clientDx: number, clientDy: number): { dx: number; dy: number } {
-  const rect = canvas.getBoundingClientRect();
-  const viewBox = canvas.viewBox.baseVal;
-  const scaleX = rect.width === 0 ? 1 : viewBox.width / rect.width;
-  const scaleY = rect.height === 0 ? 1 : viewBox.height / rect.height;
-  return { dx: clientDx * scaleX, dy: clientDy * scaleY };
+function getCanvasDelta(
+  startClientX: number,
+  startClientY: number,
+  endClientX: number,
+  endClientY: number,
+): { dx: number; dy: number } {
+  const origin = getSvgPointFromClient(startClientX, startClientY);
+  const moved = getSvgPointFromClient(endClientX, endClientY);
+  return {
+    dx: moved.x - origin.x,
+    dy: moved.y - origin.y,
+  };
 }
+
+function getCanvasPoint(event: PointerEvent): Vec2 {
+  return getSvgPointFromClient(event.clientX, event.clientY);
+}
+
+function getSvgPointFromClient(clientX: number, clientY: number): Vec2 {
+  const point = canvas.createSVGPoint();
+  point.x = clientX;
+  point.y = clientY;
+  const matrix = canvas.getScreenCTM();
+  if (!matrix) {
+    return { x: clientX, y: clientY };
+  }
+  const transformed = point.matrixTransform(matrix.inverse());
+  return { x: transformed.x, y: transformed.y };
+}
+
+function getPreviewHandleForPoint(component: ComponentNode, point: Vec2): ControlHandle | null {
+  const allowEllipseCorners = store.selectedId === component.id && component.shape === "ellipse";
+  return component.shape === "ellipse"
+    ? getEllipsePreviewHandle(component.box, point, allowEllipseCorners)
+    : getRectPreviewHandle(component.box, point);
+}
+
+function getRectPreviewHandle(box: Box, point: Vec2): ControlHandle | null {
+  const boundaryThreshold = 10;
+  const handleHit = findPreviewHandleHit(box, point, ["n", "e", "s", "w", "ne", "nw", "se", "sw"]);
+  if (handleHit) return handleHit;
+
+  const withinBoundaryBand =
+    point.x - box.x <= boundaryThreshold ||
+    box.x + box.width - point.x <= boundaryThreshold ||
+    point.y - box.y <= boundaryThreshold ||
+    box.y + box.height - point.y <= boundaryThreshold;
+
+  if (withinBoundaryBand) return null;
+  return "move";
+}
+
+function getEllipsePreviewHandle(box: Box, point: Vec2, allowCorners: boolean): ControlHandle | null {
+  const rx = box.width / 2 || 1;
+  const ry = box.height / 2 || 1;
+  const cx = box.x + rx;
+  const cy = box.y + ry;
+  const dx = point.x - cx;
+  const dy = point.y - cy;
+  const distance = (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry);
+  const handleHit = findPreviewHandleHit(box, point, allowCorners ? ["n", "e", "s", "w", "ne", "nw", "se", "sw"] : ["n", "e", "s", "w"]);
+  if (handleHit) return handleHit;
+  if (allowCorners) {
+    const boundaryThreshold = 10;
+    const withinBoundaryBand =
+      point.x - box.x <= boundaryThreshold ||
+      box.x + box.width - point.x <= boundaryThreshold ||
+      point.y - box.y <= boundaryThreshold ||
+      box.y + box.height - point.y <= boundaryThreshold;
+    if (withinBoundaryBand) return null;
+  } else if (Math.abs(1 - distance) <= 0.18) {
+    return null;
+  }
+  return "move";
+}
+
+function findPreviewHandleHit(box: Box, point: Vec2, handles: ControlHandle[]): ControlHandle | null {
+  const halfSize = 5;
+  for (const { handle, x, y } of getResizeHandlePoints(box)) {
+    if (!handles.includes(handle)) continue;
+    if (
+      point.x >= x - halfSize &&
+      point.x <= x + halfSize &&
+      point.y >= y - halfSize &&
+      point.y <= y + halfSize
+    ) {
+      return handle;
+    }
+  }
+  return null;
+}
+
 
 function getResizedBox(startBox: Box, handle: Exclude<ControlHandle, "move">, dx: number, dy: number): Box {
   const minSize = 12;
@@ -1173,6 +1284,18 @@ function createHandleOutline(box: Box): SVGRectElement {
   return outline;
 }
 
+function createHandleOutlineHit(box: Box, componentId: string): SVGRectElement {
+  const hit = createSvgElement("rect");
+  hit.setAttribute("x", String(box.x));
+  hit.setAttribute("y", String(box.y));
+  hit.setAttribute("width", String(box.width));
+  hit.setAttribute("height", String(box.height));
+  hit.setAttribute("class", "handle-outline-hit");
+  hit.setAttribute("data-component-id", componentId);
+  hit.setAttribute("data-preserve-selection", "true");
+  return hit;
+}
+
 function getSizeAnchorPoint(
   component: ComponentNode,
   anchor: "left" | "right" | "top" | "bottom",
@@ -1235,6 +1358,19 @@ function getDraggingControlKey(): string | null {
 
 function getActiveControlKey(): string | null {
   return getDraggingControlKey() ?? hoveredControlKey;
+}
+
+function getPreviewComponentId(): string | null {
+  if (dragging?.mode === "move" || dragging?.mode === "resize") {
+    return dragging.id;
+  }
+  return hoveredComponentId;
+}
+
+function getPreviewHandleForRender(): ControlHandle | null {
+  if (dragging?.mode === "move") return "move";
+  if (dragging?.mode === "resize") return dragging.handle;
+  return hoveredPreviewHandle;
 }
 
 function shouldHideOtherControls(controlKey: string): boolean {
@@ -1964,15 +2100,28 @@ canvas.addEventListener("pointermove", (event) => {
   if (!dragging) {
     const target = event.target as Element | null;
     const nextHover = target?.closest<HTMLElement>("[data-control-key]")?.dataset.controlKey ?? null;
-    if (hoveredControlKey !== nextHover) {
+    const nextHoveredComponent = target?.closest<HTMLElement>("[data-component-id]")?.dataset.componentId ?? null;
+    const nextPreviewHandle =
+      nextHoveredComponent
+        ? getPreviewHandleForPoint(store.spec.components[nextHoveredComponent], getCanvasPoint(event))
+        : null;
+    if (
+      hoveredControlKey !== nextHover ||
+      hoveredComponentId !== nextHoveredComponent ||
+      hoveredPreviewHandle !== nextPreviewHandle
+    ) {
       hoveredControlKey = nextHover;
+      hoveredComponentId = nextHoveredComponent;
+      hoveredPreviewHandle = nextPreviewHandle;
       render();
     }
     return;
   }
   const { dx, dy } = getCanvasDelta(
-    event.clientX - dragging.startClientX,
-    event.clientY - dragging.startClientY,
+    dragging.startClientX,
+    dragging.startClientY,
+    event.clientX,
+    event.clientY,
   );
 
   if (dragging.mode === "move") {
@@ -1997,6 +2146,8 @@ canvas.addEventListener("pointerdown", (event) => {
   if (store.selectedId === null && expandedMethodKey === null) return;
   dragging = null;
   hoveredControlKey = null;
+  hoveredComponentId = null;
+  hoveredPreviewHandle = null;
   store.clearSelection();
   expandedMethodKey = null;
   render();
@@ -2009,6 +2160,8 @@ sidebar.addEventListener("pointerdown", (event) => {
   if (store.selectedId === null && expandedMethodKey === null) return;
   dragging = null;
   hoveredControlKey = null;
+  hoveredComponentId = null;
+  hoveredPreviewHandle = null;
   store.clearSelection();
   expandedMethodKey = null;
   render();
@@ -2018,6 +2171,8 @@ canvas.addEventListener("pointerup", (event) => {
   if (dragging && dragging.pointerId === event.pointerId) {
     dragging = null;
     hoveredControlKey = null;
+    hoveredComponentId = null;
+    hoveredPreviewHandle = null;
     render();
   }
 });
@@ -2026,11 +2181,15 @@ canvas.addEventListener("pointerleave", (event) => {
   if (dragging && dragging.pointerId === event.pointerId) {
     dragging = null;
     hoveredControlKey = null;
+    hoveredComponentId = null;
+    hoveredPreviewHandle = null;
     render();
     return;
   }
-  if (hoveredControlKey !== null) {
+  if (hoveredControlKey !== null || hoveredComponentId !== null || hoveredPreviewHandle !== null) {
     hoveredControlKey = null;
+    hoveredComponentId = null;
+    hoveredPreviewHandle = null;
     render();
   }
 });

@@ -577,6 +577,13 @@ button:hover {
   stroke-dasharray: 3 4;
 }
 
+.handle-outline-hit {
+  pointer-events: stroke;
+  stroke-width: 10;
+  stroke: transparent;
+  fill: none;
+}
+
 .alignment-line {
   stroke: #0f766e;
   stroke-width: 1.5;
