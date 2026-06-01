@@ -141,10 +141,17 @@ type ControlHandle = "move" | "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
 type DragState =
   | { mode: "move"; id: string; pointerId: number; startClientX: number; startClientY: number; startBox: Box }
   | { mode: "resize"; id: string; pointerId: number; startClientX: number; startClientY: number; startBox: Box; handle: Exclude<ControlHandle, "move"> }
-  | { mode: "constraint"; constraintId: string; pointerId: number; startClientX: number; startClientY: number; axis: AxisKind; startValue: number; valueScale: number };
+  | { mode: "constraint"; constraintId: string; pointerId: number; startClientX: number; startClientY: number; axis: AxisKind; startValue: number; valueScale: number }
+  | { mode: "retarget"; constraintId: string; pointerId: number; axis: AxisKind; candidate: RetargetCandidate | null };
 
 type Vec2 = { x: number; y: number };
 type LabelBox = { x: number; y: number; width: number; height: number };
+type RetargetCandidate = {
+  sourceComponentId: string | null;
+  sourceAnchor: SourceAnchor;
+  point: Vec2;
+  distance: number;
+};
 type ControlAvailability = {
   canMoveX: boolean;
   canMoveY: boolean;
@@ -162,6 +169,7 @@ const ANNOTATION_ARROW_SIDE = ANNOTATION_UNIT * 0.5;
 const ANNOTATION_ARROW_LENGTH = (ANNOTATION_ARROW_SIDE * Math.sqrt(3)) / 2;
 const ANNOTATION_LABEL_CENTER_OFFSET = ANNOTATION_UNIT * 0.75;
 const ANNOTATION_LINE_GAP = 3 * 1.5;
+const ANNOTATION_VIEWPORT_MARGIN = Math.ceil(ANNOTATION_LABEL_CENTER_OFFSET + ANNOTATION_FONT_SIZE);
 
 let dragging: DragState | null = null;
 let expandedMethodKey: string | null = null;
@@ -403,7 +411,8 @@ function createHorizontalDimension(
   const group = createSvgElement("g");
   const initialTarget = getTargetAnchorPoint(component, constraint);
   if (!initialTarget) return group;
-  const source = getSourceAnchorPoint(constraint, "x", initialTarget.y);
+  const retargeting = getRetargetState(constraint.id);
+  const source = retargeting?.candidate?.point ?? getSourceAnchorPoint(constraint, "x", initialTarget.y);
   const target = getTargetAnchorPoint(component, constraint, source?.y);
   if (!target || !source) return group;
   if (Math.abs(source.x - target.x) < 0.5) {
@@ -425,6 +434,7 @@ function createHorizontalDimension(
       measureB: dimTarget,
       label: formatConstraintLabel(constraint),
       labelBoxes,
+      isRetargeting: Boolean(retargeting),
     }),
   );
   return group;
@@ -440,7 +450,8 @@ function createVerticalDimension(
   const group = createSvgElement("g");
   const initialTarget = getTargetAnchorPoint(component, constraint);
   if (!initialTarget) return group;
-  const source = getSourceAnchorPoint(constraint, "y", initialTarget.x);
+  const retargeting = getRetargetState(constraint.id);
+  const source = retargeting?.candidate?.point ?? getSourceAnchorPoint(constraint, "y", initialTarget.x);
   const target = getTargetAnchorPoint(component, constraint, source?.x);
   if (!target || !source) return group;
   if (Math.abs(source.y - target.y) < 0.5) {
@@ -462,6 +473,7 @@ function createVerticalDimension(
       measureB: dimTarget,
       label: formatConstraintLabel(constraint),
       labelBoxes,
+      isRetargeting: Boolean(retargeting),
     }),
   );
   return group;
@@ -628,6 +640,7 @@ function createStandardAnnotation({
   measureB,
   label,
   labelBoxes,
+  isRetargeting = false,
 }: {
   constraint: ConstraintSpec;
   axis: AxisKind;
@@ -637,8 +650,12 @@ function createStandardAnnotation({
   measureB: Vec2;
   label: string;
   labelBoxes: LabelBox[];
+  isRetargeting?: boolean;
 }): SVGGElement {
   const group = createSvgElement("g");
+  if (isRetargeting) {
+    group.setAttribute("class", "annotation-retargeting");
+  }
   let start = measureA;
   let end = measureB;
   let refStart = referenceA;
@@ -696,6 +713,11 @@ function createStandardAnnotation({
     if (control) {
       group.appendChild(control);
     }
+  }
+  const referenceTip = targetTip === start ? end : start;
+  const retargetControl = createReferenceRetargetControl(referenceTip, constraint, axis);
+  if (retargetControl) {
+    group.appendChild(retargetControl);
   }
   return group;
 }
@@ -980,6 +1002,39 @@ function createConstraintArrowControl(
   return path;
 }
 
+function createReferenceRetargetControl(
+  tip: Vec2,
+  constraint: ConstraintSpec,
+  axis: AxisKind,
+): SVGCircleElement | null {
+  if (!isRetargetableConstraint(constraint.kind) || constraint.locked) return null;
+  const control = createSvgElement("circle");
+  control.setAttribute("cx", String(tip.x));
+  control.setAttribute("cy", String(tip.y));
+  control.setAttribute("r", "10");
+  control.setAttribute("class", "reference-retarget-control");
+  control.setAttribute("data-preserve-selection", "true");
+  control.style.cursor = "alias";
+  control.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+  });
+  control.addEventListener("dblclick", (event) => {
+    const mouseEvent = event as MouseEvent;
+    mouseEvent.stopPropagation();
+    hoveredControlKey = getRetargetControlKey(constraint.id);
+    store.select(constraint.componentId);
+    dragging = {
+      mode: "retarget",
+      constraintId: constraint.id,
+      pointerId: 1,
+      axis,
+      candidate: findNearestRetargetCandidate(constraint, getCanvasPoint(mouseEvent)),
+    };
+    render();
+  });
+  return control;
+}
+
 function getDirectionalResizeCursor(direction: Vec2): string {
   const normalized = normalize(direction);
   const angle = Math.atan2(normalized.y, normalized.x);
@@ -1031,6 +1086,92 @@ function getSourceAnchorPoint(
   return null;
 }
 
+function getAnchorPointForCandidate(
+  sourceComponentId: string | null,
+  sourceAnchor: SourceAnchor,
+  axis: AxisKind,
+  alignedCoordinate?: number,
+): Vec2 | null {
+  if (sourceAnchor === "ratio") return null;
+  const source = sourceComponentId ? store.spec.components[sourceComponentId] : store.spec.components.root;
+  if (!source) return null;
+  if (source.id === "root") {
+    return getViewportAnchorPoint(sourceAnchor, axis, alignedCoordinate);
+  }
+  if (sourceAnchor === "left") return getBoundaryAnchorPoint(source, "left", "x", alignedCoordinate);
+  if (sourceAnchor === "right") return getBoundaryAnchorPoint(source, "right", "x", alignedCoordinate);
+  if (sourceAnchor === "centerX") return getBoundaryAnchorPoint(source, "centerX", "x", alignedCoordinate);
+  if (sourceAnchor === "top") return getBoundaryAnchorPoint(source, "top", "y", alignedCoordinate);
+  if (sourceAnchor === "bottom") return getBoundaryAnchorPoint(source, "bottom", "y", alignedCoordinate);
+  if (sourceAnchor === "centerY") return getBoundaryAnchorPoint(source, "centerY", "y", alignedCoordinate);
+  return null;
+}
+
+function getRetargetableAnchors(axis: AxisKind): SourceAnchor[] {
+  return axis === "x" ? ["left", "right", "centerX"] : ["top", "bottom", "centerY"];
+}
+
+function isRetargetableConstraint(kind: ConstraintKind): boolean {
+  return kind === "left" || kind === "right" || kind === "top" || kind === "bottom" || kind === "centerX" || kind === "centerY";
+}
+
+function componentDependsOn(componentId: string, targetId: string, visited = new Set<string>()): boolean {
+  if (componentId === targetId) return true;
+  if (visited.has(componentId)) return false;
+  visited.add(componentId);
+  const dependencies = store.spec.constraints
+    .filter((constraint) => constraint.componentId === componentId && constraint.sourceComponentId)
+    .map((constraint) => constraint.sourceComponentId)
+    .filter((value): value is string => Boolean(value));
+
+  for (const dependencyId of dependencies) {
+    if (dependencyId === targetId) return true;
+    if (componentDependsOn(dependencyId, targetId, visited)) return true;
+  }
+  return false;
+}
+
+function wouldCreateRetargetCycle(constraint: ConstraintSpec, sourceComponentId: string | null): boolean {
+  if (sourceComponentId === null) return false;
+  if (sourceComponentId === constraint.componentId) return true;
+  return componentDependsOn(sourceComponentId, constraint.componentId);
+}
+
+function findNearestRetargetCandidate(constraint: ConstraintSpec, point: Vec2): RetargetCandidate | null {
+  const anchors = getRetargetableAnchors(constraint.axis);
+  const alignedCoordinate = constraint.axis === "x" ? point.y : point.x;
+  const candidates: RetargetCandidate[] = [];
+
+  for (const anchor of anchors) {
+    const viewportPoint = getAnchorPointForCandidate(null, anchor, constraint.axis, alignedCoordinate);
+    if (viewportPoint) {
+      candidates.push({
+        sourceComponentId: null,
+        sourceAnchor: anchor,
+        point: viewportPoint,
+        distance: length(subtract(viewportPoint, point)),
+      });
+    }
+  }
+
+  for (const component of store.components) {
+    if (wouldCreateRetargetCycle(constraint, component.id)) continue;
+    for (const anchor of anchors) {
+      const anchorPoint = getAnchorPointForCandidate(component.id, anchor, constraint.axis, alignedCoordinate);
+      if (!anchorPoint) continue;
+      candidates.push({
+        sourceComponentId: component.id,
+        sourceAnchor: anchor,
+        point: anchorPoint,
+        distance: length(subtract(anchorPoint, point)),
+      });
+    }
+  }
+
+  candidates.sort((a, b) => a.distance - b.distance);
+  return candidates[0] ?? null;
+}
+
 function getViewportAnchorPoint(
   anchor: SourceAnchor,
   axis: AxisKind,
@@ -1040,14 +1181,28 @@ function getViewportAnchorPoint(
     const y = alignedCoordinate ?? store.spec.viewport.height / 2;
     if (anchor === "left") return { x: 0, y };
     if (anchor === "right") return { x: store.spec.viewport.width, y };
-    if (anchor === "centerX") return { x: store.spec.viewport.width / 2, y: store.spec.viewport.height / 2 };
+    if (anchor === "centerX") {
+      const topDistance = Math.abs(y - 0);
+      const bottomDistance = Math.abs(store.spec.viewport.height - y);
+      return {
+        x: store.spec.viewport.width / 2,
+        y: topDistance <= bottomDistance ? 0 : store.spec.viewport.height,
+      };
+    }
   }
 
   if (axis === "y") {
     const x = alignedCoordinate ?? store.spec.viewport.width / 2;
     if (anchor === "top") return { x, y: 0 };
     if (anchor === "bottom") return { x, y: store.spec.viewport.height };
-    if (anchor === "centerY") return { x: store.spec.viewport.width / 2, y: store.spec.viewport.height / 2 };
+    if (anchor === "centerY") {
+      const leftDistance = Math.abs(x - 0);
+      const rightDistance = Math.abs(store.spec.viewport.width - x);
+      return {
+        x: leftDistance <= rightDistance ? 0 : store.spec.viewport.width,
+        y: store.spec.viewport.height / 2,
+      };
+    }
   }
 
   return null;
@@ -1132,7 +1287,7 @@ function getCanvasDelta(
   };
 }
 
-function getCanvasPoint(event: PointerEvent): Vec2 {
+function getCanvasPoint(event: MouseEvent | PointerEvent): Vec2 {
   return getSvgPointFromClient(event.clientX, event.clientY);
 }
 
@@ -1393,10 +1548,15 @@ function getConstraintControlKey(constraintId: string): string {
   return `constraint:${constraintId}`;
 }
 
+function getRetargetControlKey(constraintId: string): string {
+  return `retarget:${constraintId}`;
+}
+
 function getDraggingControlKey(): string | null {
   if (!dragging) return null;
   if (dragging.mode === "move") return getHandleControlKey(dragging.id, "move");
   if (dragging.mode === "resize") return getHandleControlKey(dragging.id, dragging.handle);
+  if (dragging.mode === "retarget") return getRetargetControlKey(dragging.constraintId);
   return getConstraintControlKey(dragging.constraintId);
 }
 
@@ -1424,6 +1584,10 @@ function shouldHideOtherControls(controlKey: string): boolean {
 
 function isControlActive(controlKey: string): boolean {
   return getActiveControlKey() === controlKey;
+}
+
+function getRetargetState(constraintId: string): Extract<DragState, { mode: "retarget" }> | null {
+  return dragging?.mode === "retarget" && dragging.constraintId === constraintId ? dragging : null;
 }
 
 function getControlAvailability(componentId: string): ControlAvailability {
@@ -1618,16 +1782,35 @@ function reserveHorizontalBand(
 ): number {
   const start = Math.min(x1, x2);
   const end = Math.max(x1, x2);
-  let y = proposedY;
-  while (
-    bands.some(
+  const step = 16 + ANNOTATION_LINE_GAP;
+  const minY = ANNOTATION_VIEWPORT_MARGIN;
+  const maxY = store.spec.viewport.height - ANNOTATION_VIEWPORT_MARGIN;
+  const clampedBase = clamp(proposedY, minY, maxY);
+  const primaryDirection = proposedY < minY ? 1 : proposedY > maxY ? -1 : proposedY < store.spec.viewport.height / 2 ? -1 : 1;
+
+  const canPlace = (y: number) =>
+    !bands.some(
       (band) =>
         Math.abs(band.y - y) < 14 + ANNOTATION_LINE_GAP &&
         !(end < band.start - ANNOTATION_LINE_GAP || start > band.end + ANNOTATION_LINE_GAP),
-    )
-  ) {
-    y -= 16 + ANNOTATION_LINE_GAP;
+    );
+
+  let y = clampedBase;
+  if (!canPlace(y)) {
+    const maxSteps = Math.max(1, Math.ceil(store.spec.viewport.height / step));
+    for (let distance = 1; distance <= maxSteps; distance += 1) {
+      const candidates = [
+        clampedBase + primaryDirection * distance * step,
+        clampedBase - primaryDirection * distance * step,
+      ].filter((candidate, index, all) => candidate >= minY && candidate <= maxY && all.indexOf(candidate) === index);
+      const match = candidates.find(canPlace);
+      if (match !== undefined) {
+        y = match;
+        break;
+      }
+    }
   }
+  y = clamp(y, minY, maxY);
   bands.push({ y, start, end });
   return y;
 }
@@ -1640,16 +1823,35 @@ function reserveVerticalBand(
 ): number {
   const start = Math.min(y1, y2);
   const end = Math.max(y1, y2);
-  let x = proposedX;
-  while (
-    bands.some(
+  const step = 16 + ANNOTATION_LINE_GAP;
+  const minX = ANNOTATION_VIEWPORT_MARGIN;
+  const maxX = store.spec.viewport.width - ANNOTATION_VIEWPORT_MARGIN;
+  const clampedBase = clamp(proposedX, minX, maxX);
+  const primaryDirection = proposedX < minX ? 1 : proposedX > maxX ? -1 : proposedX < store.spec.viewport.width / 2 ? -1 : 1;
+
+  const canPlace = (x: number) =>
+    !bands.some(
       (band) =>
         Math.abs(band.x - x) < 14 + ANNOTATION_LINE_GAP &&
         !(end < band.start - ANNOTATION_LINE_GAP || start > band.end + ANNOTATION_LINE_GAP),
-    )
-  ) {
-    x += 16 + ANNOTATION_LINE_GAP;
+    );
+
+  let x = clampedBase;
+  if (!canPlace(x)) {
+    const maxSteps = Math.max(1, Math.ceil(store.spec.viewport.width / step));
+    for (let distance = 1; distance <= maxSteps; distance += 1) {
+      const candidates = [
+        clampedBase + primaryDirection * distance * step,
+        clampedBase - primaryDirection * distance * step,
+      ].filter((candidate, index, all) => candidate >= minX && candidate <= maxX && all.indexOf(candidate) === index);
+      const match = candidates.find(canPlace);
+      if (match !== undefined) {
+        x = match;
+        break;
+      }
+    }
   }
+  x = clamp(x, minX, maxX);
   bands.push({ x, start, end });
   return x;
 }
@@ -2197,6 +2399,30 @@ function updateConstraintFromRow(componentId: string, element: HTMLInputElement 
   syncExportState();
 }
 
+function commitRetargetConstraint(constraintId: string, candidate: RetargetCandidate | null): void {
+  if (!candidate) return;
+  const constraint = store.spec.constraints.find((item) => item.id === constraintId);
+  if (!constraint) return;
+  const measured = store.measureDraftConstraint({
+    componentId: constraint.componentId,
+    axis: constraint.axis,
+    kind: constraint.kind,
+    sourceComponentId: candidate.sourceComponentId,
+    sourceAnchor: candidate.sourceAnchor,
+    unit: constraint.unit,
+  });
+  store.upsertConstraint({
+    componentId: constraint.componentId,
+    axis: constraint.axis,
+    kind: constraint.kind,
+    sourceComponentId: candidate.sourceComponentId,
+    sourceAnchor: candidate.sourceAnchor,
+    value: measured !== null && Number.isFinite(measured) ? measured : constraint.value,
+    unit: constraint.unit,
+    locked: constraint.locked,
+  });
+}
+
 function getDefaultAnchor(axis: AxisKind, kind: ConstraintKind): SourceAnchor {
   if (kind === "ratio") return "ratio";
   if (kind === "left") return "left";
@@ -2260,30 +2486,49 @@ canvas.addEventListener("pointermove", (event) => {
     }
     return;
   }
+  const activeDrag = dragging;
+  if (activeDrag.mode === "retarget") {
+    const constraint = store.spec.constraints.find((item) => item.id === activeDrag.constraintId);
+    if (constraint) {
+      activeDrag.candidate = findNearestRetargetCandidate(constraint, getCanvasPoint(event));
+    }
+    render();
+    return;
+  }
   const { dx, dy } = getCanvasDelta(
-    dragging.startClientX,
-    dragging.startClientY,
+    activeDrag.startClientX,
+    activeDrag.startClientY,
     event.clientX,
     event.clientY,
   );
 
-  if (dragging.mode === "move") {
-    store.setComponentBox(dragging.id, {
-      x: dragging.startBox.x + dx,
-      y: dragging.startBox.y + dy,
-      width: dragging.startBox.width,
-      height: dragging.startBox.height,
+  if (activeDrag.mode === "move") {
+    store.setComponentBox(activeDrag.id, {
+      x: activeDrag.startBox.x + dx,
+      y: activeDrag.startBox.y + dy,
+      width: activeDrag.startBox.width,
+      height: activeDrag.startBox.height,
     });
-  } else if (dragging.mode === "resize") {
-    store.setComponentBox(dragging.id, getResizedBox(dragging.startBox, dragging.handle, dx, dy));
+  } else if (activeDrag.mode === "resize") {
+    store.setComponentBox(activeDrag.id, getResizedBox(activeDrag.startBox, activeDrag.handle, dx, dy));
   } else {
-    const delta = (dragging.axis === "x" ? dx : dy) * dragging.valueScale;
-    store.adjustConstraintValue(dragging.constraintId, delta, dragging.startValue);
+    const delta = (activeDrag.axis === "x" ? dx : dy) * activeDrag.valueScale;
+    store.adjustConstraintValue(activeDrag.constraintId, delta, activeDrag.startValue);
   }
   render();
 });
 
 canvas.addEventListener("pointerdown", (event) => {
+  if (dragging?.mode === "retarget") {
+    commitRetargetConstraint(dragging.constraintId, dragging.candidate);
+    dragging = null;
+    hoveredControlKey = null;
+    hoveredComponentId = null;
+    hoveredPreviewHandle = null;
+    syncCanvasCursor(null, null);
+    render();
+    return;
+  }
   const target = event.target as Element | null;
   if (target?.closest("[data-preserve-selection='true']")) return;
   if (store.selectedId === null && expandedMethodKey === null) return;
@@ -2313,7 +2558,10 @@ sidebar.addEventListener("pointerdown", (event) => {
 });
 
 canvas.addEventListener("pointerup", (event) => {
-  if (dragging && dragging.pointerId === event.pointerId) {
+  if (dragging && (dragging.mode === "retarget" || dragging.pointerId === event.pointerId)) {
+    if (dragging.mode === "retarget") {
+      commitRetargetConstraint(dragging.constraintId, dragging.candidate);
+    }
     dragging = null;
     hoveredControlKey = null;
     hoveredComponentId = null;

@@ -631,6 +631,27 @@ button:hover {
   user-select: none;
 }
 
+.annotation-retargeting .dimension-line,
+.annotation-retargeting .dimension-extension,
+.annotation-retargeting .annotation-guide,
+.annotation-retargeting .dimension-label,
+.annotation-retargeting .dimension-arrow {
+  stroke: #ea580c;
+  fill: #ea580c;
+}
+
+.annotation-retargeting .dimension-line,
+.annotation-retargeting .dimension-extension,
+.annotation-retargeting .annotation-guide {
+  stroke-dasharray: 6 4;
+}
+
+.reference-retarget-control {
+  fill: transparent;
+  stroke: transparent;
+  pointer-events: all;
+}
+
 .constraint-overlay .is-locked {
   opacity: 0.7;
 }

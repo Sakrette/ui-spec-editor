@@ -370,10 +370,12 @@ export class EditorStore {
   public setComponentBox(componentId: string, nextBox: { x: number; y: number; width: number; height: number }): void {
     const component = this.spec.components[componentId];
     if (!component || component.id === "root") return;
-    component.box.x = Math.round(nextBox.x);
-    component.box.y = Math.round(nextBox.y);
-    component.box.width = Math.max(1, Math.round(nextBox.width));
-    component.box.height = Math.max(1, Math.round(nextBox.height));
+    const width = clamp(Math.round(nextBox.width), 1, this.spec.viewport.width);
+    const height = clamp(Math.round(nextBox.height), 1, this.spec.viewport.height);
+    component.box.width = width;
+    component.box.height = height;
+    component.box.x = clamp(Math.round(nextBox.x), 0, this.spec.viewport.width - width);
+    component.box.y = clamp(Math.round(nextBox.y), 0, this.spec.viewport.height - height);
     this.syncConstraintsFromBox(component.id);
     this.solveLayout();
   }
@@ -749,6 +751,10 @@ function roundConstraintValue(value: number, unit: UnitKind): number {
     return Math.round(value * 1000) / 1000;
   }
   return Math.round(value);
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 function normalizeConstraintInputValue(kind: ConstraintKind, value: number, unit: UnitKind): number {
