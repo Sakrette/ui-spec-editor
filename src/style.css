@@ -578,10 +578,10 @@ button:hover {
 }
 
 .handle-outline-hit {
-  pointer-events: stroke;
+  pointer-events: all;
   stroke-width: 10;
   stroke: transparent;
-  fill: none;
+  fill: transparent;
 }
 
 .alignment-line {
@@ -615,8 +615,8 @@ button:hover {
   user-select: none;
 }
 
-.dimension-line {
-}
+/* .dimension-line {
+} */
 
 .dimension-arrow {
   fill: #0f766e;

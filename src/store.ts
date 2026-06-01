@@ -168,6 +168,7 @@ export class EditorStore {
     const constraint: ConstraintSpec = {
       id: `constraint-${this.nextId++}`,
       ...input,
+      value: normalizeConstraintInputValue(input.kind, input.value, input.unit),
       locked: input.locked ?? false,
     };
     this.spec.constraints.push(constraint);
@@ -200,7 +201,7 @@ export class EditorStore {
     if (existing) {
       existing.sourceComponentId = input.sourceComponentId;
       existing.sourceAnchor = input.sourceAnchor;
-      existing.value = input.value;
+      existing.value = normalizeConstraintInputValue(input.kind, input.value, input.unit);
       existing.unit = input.unit;
       existing.locked = input.locked ?? existing.locked ?? false;
       existing.ratioParts = input.ratioParts;
@@ -347,7 +348,11 @@ export class EditorStore {
 
     const basis = this.getConstraintBasis(constraint);
     const deltaValue = constraint.unit === "percent" ? (basis === 0 ? 0 : (deltaPixels / basis) * 100) : deltaPixels;
-    constraint.value = roundConstraintValue((baseValue ?? constraint.value) + deltaValue, constraint.unit);
+    constraint.value = normalizeConstraintInputValue(
+      constraint.kind,
+      roundConstraintValue((baseValue ?? constraint.value) + deltaValue, constraint.unit),
+      constraint.unit,
+    );
     this.rememberConstraintDraft(constraint);
     this.solveLayout();
   }
@@ -708,6 +713,14 @@ function roundConstraintValue(value: number, unit: UnitKind): number {
     return Math.round(value * 1000) / 1000;
   }
   return Math.round(value);
+}
+
+function normalizeConstraintInputValue(kind: ConstraintKind, value: number, unit: UnitKind): number {
+  const rounded = roundConstraintValue(value, unit);
+  if (kind === "width" || kind === "height") {
+    return Math.max(1, rounded);
+  }
+  return rounded;
 }
 
 function getConstraintKey(componentId: string, axis: "x" | "y", kind: ConstraintKind): string {

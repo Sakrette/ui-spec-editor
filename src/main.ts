@@ -145,6 +145,16 @@ type DragState =
 
 type Vec2 = { x: number; y: number };
 type LabelBox = { x: number; y: number; width: number; height: number };
+type ControlAvailability = {
+  canMoveX: boolean;
+  canMoveY: boolean;
+  canResizeLeft: boolean;
+  canResizeRight: boolean;
+  canResizeTop: boolean;
+  canResizeBottom: boolean;
+  widthFixed: boolean;
+  heightFixed: boolean;
+};
 
 const ANNOTATION_FONT_SIZE = 12;
 const ANNOTATION_UNIT = ANNOTATION_FONT_SIZE;
@@ -285,16 +295,14 @@ function createResizeHandles(component: ComponentNode, preview = false, previewH
   group.setAttribute("class", "resize-handles");
   group.setAttribute("data-preserve-selection", "true");
   group.setAttribute("data-component-id", component.id);
-  const ratioLocked = hasLockedRatioConstraint(component.id);
-  const xLocked = ratioLocked || hasLockedAxisConstraint(component.id, "x");
-  const yLocked = ratioLocked || hasLockedAxisConstraint(component.id, "y");
+  const availability = getControlAvailability(component.id);
 
   if (component.shape === "ellipse" && !preview) {
     group.appendChild(createHandleOutline(component.box));
   }
 
   for (const { handle, x, y, cursor } of getResizeHandlePoints(component.box)) {
-    if (isResizeHandleHidden(handle, xLocked, yLocked, preview, previewHandle)) continue;
+    if (isResizeHandleHidden(handle, availability, preview, previewHandle)) continue;
     const key = getHandleControlKey(component.id, handle);
     if (shouldHideOtherControls(key)) continue;
     const node = createControlHandle(component, handle, x, y, cursor);
@@ -304,32 +312,29 @@ function createResizeHandles(component: ComponentNode, preview = false, previewH
   return group;
 }
 
-function hasLockedAxisConstraint(componentId: string, axis: AxisKind): boolean {
-  return store.spec.constraints.some(
-    (constraint) => constraint.componentId === componentId && constraint.axis === axis && constraint.locked,
-  );
-}
-
-function hasLockedRatioConstraint(componentId: string): boolean {
-  return store.spec.constraints.some(
-    (constraint) => constraint.componentId === componentId && constraint.kind === "ratio" && constraint.locked,
-  );
+function isHandleAvailable(handle: ControlHandle, availability: ControlAvailability): boolean {
+  if (handle === "move") return availability.canMoveX || availability.canMoveY;
+  if (handle === "w") return availability.canResizeLeft;
+  if (handle === "e") return availability.canResizeRight;
+  if (handle === "n") return availability.canResizeTop;
+  if (handle === "s") return availability.canResizeBottom;
+  if (handle === "nw") return availability.canResizeLeft && availability.canResizeTop;
+  if (handle === "ne") return availability.canResizeRight && availability.canResizeTop;
+  if (handle === "sw") return availability.canResizeLeft && availability.canResizeBottom;
+  if (handle === "se") return availability.canResizeRight && availability.canResizeBottom;
+  return false;
 }
 
 function isResizeHandleHidden(
   handle: ControlHandle,
-  xLocked: boolean,
-  yLocked: boolean,
+  availability: ControlAvailability,
   preview: boolean,
   previewHandle: ControlHandle | null = null,
 ): boolean {
   if (preview) {
     return handle !== previewHandle;
   }
-  if (handle === "move") return xLocked && yLocked;
-  if (xLocked && ["e", "w", "ne", "nw", "se", "sw"].includes(handle)) return true;
-  if (yLocked && ["n", "s", "ne", "nw", "se", "sw"].includes(handle)) return true;
-  return false;
+  return !isHandleAvailable(handle, availability);
 }
 
 function createConstraintOverlay(
@@ -926,6 +931,15 @@ function createConstraintArrowControl(
   ratio = false,
   valueScale = 1,
 ): SVGPathElement | null {
+  const availability = getControlAvailability(constraint.componentId);
+  if (constraint.locked) return null;
+  if (ratio && availability.widthFixed && availability.heightFixed) return null;
+  if (constraint.kind === "left" && !availability.canResizeLeft) return null;
+  if (constraint.kind === "right" && !availability.canResizeRight) return null;
+  if (constraint.kind === "centerX" && !availability.canMoveX) return null;
+  if (constraint.kind === "top" && !availability.canResizeTop) return null;
+  if (constraint.kind === "bottom" && !availability.canResizeBottom) return null;
+  if (constraint.kind === "centerY" && !availability.canMoveY) return null;
   const key = getConstraintControlKey(constraint.id);
   if (shouldHideOtherControls(key)) return null;
 
@@ -943,12 +957,7 @@ function createConstraintArrowControl(
   path.setAttribute("data-preserve-selection", "true");
   path.setAttribute("data-control-key", key);
 
-  if (constraint.locked) {
-    path.classList.add("is-locked");
-    return path;
-  }
-
-  path.style.cursor = "grab";
+  path.style.cursor = getDirectionalResizeCursor(direction);
   path.addEventListener("pointerdown", (event) => {
     const pointerEvent = event as PointerEvent;
     pointerEvent.stopPropagation();
@@ -969,6 +978,21 @@ function createConstraintArrowControl(
   });
 
   return path;
+}
+
+function getDirectionalResizeCursor(direction: Vec2): string {
+  const normalized = normalize(direction);
+  const angle = Math.atan2(normalized.y, normalized.x);
+  const degrees = ((angle * 180) / Math.PI + 360) % 360;
+
+  if (degrees >= 22.5 && degrees < 67.5) return "nwse-resize";
+  if (degrees >= 67.5 && degrees < 112.5) return "ns-resize";
+  if (degrees >= 112.5 && degrees < 157.5) return "nesw-resize";
+  if (degrees >= 157.5 && degrees < 202.5) return "ew-resize";
+  if (degrees >= 202.5 && degrees < 247.5) return "nwse-resize";
+  if (degrees >= 247.5 && degrees < 292.5) return "ns-resize";
+  if (degrees >= 292.5 && degrees < 337.5) return "nesw-resize";
+  return "ew-resize";
 }
 
 function getTargetAnchorPoint(
@@ -1126,27 +1150,24 @@ function getSvgPointFromClient(clientX: number, clientY: number): Vec2 {
 
 function getPreviewHandleForPoint(component: ComponentNode, point: Vec2): ControlHandle | null {
   const allowEllipseCorners = store.selectedId === component.id && component.shape === "ellipse";
+  const availability = getControlAvailability(component.id);
   return component.shape === "ellipse"
-    ? getEllipsePreviewHandle(component.box, point, allowEllipseCorners)
-    : getRectPreviewHandle(component.box, point);
+    ? getEllipsePreviewHandle(component.box, point, allowEllipseCorners, availability)
+    : getRectPreviewHandle(component.box, point, availability);
 }
 
-function getRectPreviewHandle(box: Box, point: Vec2): ControlHandle | null {
-  const boundaryThreshold = 10;
+function getRectPreviewHandle(box: Box, point: Vec2, availability: ControlAvailability): ControlHandle | null {
   const handleHit = findPreviewHandleHit(box, point, ["n", "e", "s", "w", "ne", "nw", "se", "sw"]);
-  if (handleHit) return handleHit;
-
-  const withinBoundaryBand =
-    point.x - box.x <= boundaryThreshold ||
-    box.x + box.width - point.x <= boundaryThreshold ||
-    point.y - box.y <= boundaryThreshold ||
-    box.y + box.height - point.y <= boundaryThreshold;
-
-  if (withinBoundaryBand) return null;
-  return "move";
+  if (handleHit && isHandleAvailable(handleHit, availability)) return handleHit;
+  return isHandleAvailable("move", availability) ? "move" : null;
 }
 
-function getEllipsePreviewHandle(box: Box, point: Vec2, allowCorners: boolean): ControlHandle | null {
+function getEllipsePreviewHandle(
+  box: Box,
+  point: Vec2,
+  allowCorners: boolean,
+  availability: ControlAvailability,
+): ControlHandle | null {
   const rx = box.width / 2 || 1;
   const ry = box.height / 2 || 1;
   const cx = box.x + rx;
@@ -1155,19 +1176,11 @@ function getEllipsePreviewHandle(box: Box, point: Vec2, allowCorners: boolean): 
   const dy = point.y - cy;
   const distance = (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry);
   const handleHit = findPreviewHandleHit(box, point, allowCorners ? ["n", "e", "s", "w", "ne", "nw", "se", "sw"] : ["n", "e", "s", "w"]);
-  if (handleHit) return handleHit;
-  if (allowCorners) {
-    const boundaryThreshold = 10;
-    const withinBoundaryBand =
-      point.x - box.x <= boundaryThreshold ||
-      box.x + box.width - point.x <= boundaryThreshold ||
-      point.y - box.y <= boundaryThreshold ||
-      box.y + box.height - point.y <= boundaryThreshold;
-    if (withinBoundaryBand) return null;
-  } else if (Math.abs(1 - distance) <= 0.18) {
-    return null;
+  if (handleHit && isHandleAvailable(handleHit, availability)) return handleHit;
+  if (!allowCorners && Math.abs(1 - distance) <= 0.18) {
+    return isHandleAvailable("move", availability) ? "move" : null;
   }
-  return "move";
+  return isHandleAvailable("move", availability) ? "move" : null;
 }
 
 function findPreviewHandleHit(box: Box, point: Vec2, handles: ControlHandle[]): ControlHandle | null {
@@ -1188,7 +1201,7 @@ function findPreviewHandleHit(box: Box, point: Vec2, handles: ControlHandle[]): 
 
 
 function getResizedBox(startBox: Box, handle: Exclude<ControlHandle, "move">, dx: number, dy: number): Box {
-  const minSize = 12;
+  const minSize = 1;
   let left = startBox.x;
   let right = startBox.x + startBox.width;
   let top = startBox.y;
@@ -1274,6 +1287,20 @@ function createControlHandle(
   return node;
 }
 
+function getCursorForHandle(handle: ControlHandle | null): string {
+  if (handle === null) return "";
+  if (handle === "move") return "move";
+  if (handle === "w" || handle === "e") return "ew-resize";
+  if (handle === "n" || handle === "s") return "ns-resize";
+  if (handle === "nw" || handle === "se") return "nwse-resize";
+  if (handle === "ne" || handle === "sw") return "nesw-resize";
+  return "";
+}
+
+function syncCanvasCursor(previewHandle: ControlHandle | null, hoveredControl: string | null): void {
+  canvas.style.cursor = hoveredControl ? "" : getCursorForHandle(previewHandle);
+}
+
 function createHandleOutline(box: Box): SVGRectElement {
   const outline = createSvgElement("rect");
   outline.setAttribute("x", String(box.x));
@@ -1293,6 +1320,23 @@ function createHandleOutlineHit(box: Box, componentId: string): SVGRectElement {
   hit.setAttribute("class", "handle-outline-hit");
   hit.setAttribute("data-component-id", componentId);
   hit.setAttribute("data-preserve-selection", "true");
+  hit.addEventListener("pointerdown", (event) => {
+    const pointerEvent = event as PointerEvent;
+    const component = store.spec.components[componentId];
+    if (!component || component.id === "root") return;
+    pointerEvent.stopPropagation();
+    store.select(componentId);
+    dragging = {
+      mode: "move",
+      id: componentId,
+      pointerId: pointerEvent.pointerId,
+      startClientX: pointerEvent.clientX,
+      startClientY: pointerEvent.clientY,
+      startBox: cloneBox(component.box),
+    };
+    canvas.setPointerCapture(pointerEvent.pointerId);
+    render();
+  });
   return hit;
 }
 
@@ -1382,6 +1426,87 @@ function isControlActive(controlKey: string): boolean {
   return getActiveControlKey() === controlKey;
 }
 
+function getControlAvailability(componentId: string): ControlAvailability {
+  const constraints = store.spec.constraints.filter((constraint) => constraint.componentId === componentId);
+  const xLocks = getAxisLockSummary(constraints, "x");
+  const yLocks = getAxisLockSummary(constraints, "y");
+  const ratioLocked = constraints.some((constraint) => constraint.kind === "ratio" && constraint.locked);
+
+  let widthFixed = xLocks.widthFixedBase;
+  let heightFixed = yLocks.heightFixedBase;
+  if (ratioLocked) {
+    widthFixed ||= heightFixed;
+    heightFixed ||= widthFixed;
+  }
+
+  const leftFixed =
+    xLocks.leftLocked ||
+    (xLocks.rightLocked && xLocks.centerLocked) ||
+    (xLocks.rightLocked && widthFixed) ||
+    (xLocks.centerLocked && widthFixed);
+
+  const rightFixed =
+    xLocks.rightLocked ||
+    (xLocks.leftLocked && xLocks.centerLocked) ||
+    (xLocks.leftLocked && widthFixed) ||
+    (xLocks.centerLocked && widthFixed);
+
+  const topFixed =
+    yLocks.topLocked ||
+    (yLocks.bottomLocked && yLocks.centerLocked) ||
+    (yLocks.bottomLocked && heightFixed) ||
+    (yLocks.centerLocked && heightFixed);
+
+  const bottomFixed =
+    yLocks.bottomLocked ||
+    (yLocks.topLocked && yLocks.centerLocked) ||
+    (yLocks.topLocked && heightFixed) ||
+    (yLocks.centerLocked && heightFixed);
+
+  return {
+    canMoveX: !(xLocks.centerLocked || leftFixed || rightFixed),
+    canMoveY: !(yLocks.centerLocked || topFixed || bottomFixed),
+    canResizeLeft: !(leftFixed || widthFixed),
+    canResizeRight: !(rightFixed || widthFixed),
+    canResizeTop: !(topFixed || heightFixed),
+    canResizeBottom: !(bottomFixed || heightFixed),
+    widthFixed,
+    heightFixed,
+  };
+}
+
+function getAxisLockSummary(
+  constraints: ConstraintSpec[],
+  axis: AxisKind,
+): {
+  leftLocked: boolean;
+  rightLocked: boolean;
+  centerLocked: boolean;
+  widthFixedBase: boolean;
+  topLocked: boolean;
+  bottomLocked: boolean;
+  heightFixedBase: boolean;
+} {
+  const axisConstraints = constraints.filter((constraint) => constraint.axis === axis && constraint.locked);
+  const kinds = new Set(axisConstraints.map((constraint) => constraint.kind));
+  const leftLocked = kinds.has("left");
+  const rightLocked = kinds.has("right");
+  const centerLocked = kinds.has(axis === "x" ? "centerX" : "centerY");
+  const sizeLocked = kinds.has(axis === "x" ? "width" : "height");
+  const ordinaryLockedCount = [leftLocked, rightLocked, centerLocked, sizeLocked].filter(Boolean).length;
+  const axisFixed = ordinaryLockedCount >= 2;
+
+  return {
+    leftLocked: axis === "x" ? leftLocked || axisFixed : false,
+    rightLocked: axis === "x" ? rightLocked || axisFixed : false,
+    centerLocked: centerLocked || axisFixed,
+    widthFixedBase: axis === "x" ? sizeLocked || axisFixed : false,
+    topLocked: axis === "y" ? leftLocked || axisFixed : false,
+    bottomLocked: axis === "y" ? rightLocked || axisFixed : false,
+    heightFixedBase: axis === "y" ? sizeLocked || axisFixed : false,
+  };
+}
+
 function getConstraintControlSpecs(
   constraint: ConstraintSpec,
   axis: AxisKind,
@@ -1390,6 +1515,7 @@ function getConstraintControlSpecs(
   dir: Vec2,
   targetTip: Vec2,
 ): Array<{ tip: Vec2; direction: Vec2; valueScale: number }> {
+  const availability = getControlAvailability(constraint.componentId);
   if (constraint.kind === "width") {
     const kinds = store.spec.constraints
       .filter(
@@ -1399,10 +1525,10 @@ function getConstraintControlSpecs(
     const leftConstrained = kinds.includes("left");
     const rightConstrained = kinds.includes("right");
     const controls: Array<{ tip: Vec2; direction: Vec2; valueScale: number }> = [];
-    if (!leftConstrained) {
+    if (!leftConstrained && availability.canResizeLeft) {
       controls.push({ tip: start, direction: dir, valueScale: -1 });
     }
-    if (!rightConstrained) {
+    if (!rightConstrained && availability.canResizeRight) {
       controls.push({ tip: end, direction: scale(dir, -1), valueScale: 1 });
     }
     return controls;
@@ -1417,14 +1543,22 @@ function getConstraintControlSpecs(
     const bottomConstrained = kinds.includes("bottom");
     const topConstrained = kinds.includes("top");
     const controls: Array<{ tip: Vec2; direction: Vec2; valueScale: number }> = [];
-    if (!bottomConstrained) {
+    if (!bottomConstrained && availability.canResizeBottom) {
       controls.push({ tip: start, direction: dir, valueScale: 1 });
     }
-    if (!topConstrained) {
+    if (!topConstrained && availability.canResizeTop) {
       controls.push({ tip: end, direction: scale(dir, -1), valueScale: -1 });
     }
     return controls;
   }
+
+  if (constraint.kind === "left" && !availability.canResizeLeft) return [];
+  if (constraint.kind === "right" && !availability.canResizeRight) return [];
+  if (constraint.kind === "centerX" && !availability.canMoveX) return [];
+  if (constraint.kind === "top" && !availability.canResizeTop) return [];
+  if (constraint.kind === "bottom" && !availability.canResizeBottom) return [];
+  if (constraint.kind === "centerY" && !availability.canMoveY) return [];
+  if (constraint.kind === "ratio" && availability.widthFixed && availability.heightFixed) return [];
 
   const direction = targetTip === end ? scale(dir, -1) : dir;
   return [{ tip: targetTip, direction, valueScale: 1 }];
@@ -2105,6 +2239,7 @@ canvas.addEventListener("pointermove", (event) => {
       nextHoveredComponent
         ? getPreviewHandleForPoint(store.spec.components[nextHoveredComponent], getCanvasPoint(event))
         : null;
+    syncCanvasCursor(nextPreviewHandle, nextHover);
     if (
       hoveredControlKey !== nextHover ||
       hoveredComponentId !== nextHoveredComponent ||
@@ -2148,6 +2283,7 @@ canvas.addEventListener("pointerdown", (event) => {
   hoveredControlKey = null;
   hoveredComponentId = null;
   hoveredPreviewHandle = null;
+  syncCanvasCursor(null, null);
   store.clearSelection();
   expandedMethodKey = null;
   render();
@@ -2162,6 +2298,7 @@ sidebar.addEventListener("pointerdown", (event) => {
   hoveredControlKey = null;
   hoveredComponentId = null;
   hoveredPreviewHandle = null;
+  syncCanvasCursor(null, null);
   store.clearSelection();
   expandedMethodKey = null;
   render();
@@ -2173,6 +2310,7 @@ canvas.addEventListener("pointerup", (event) => {
     hoveredControlKey = null;
     hoveredComponentId = null;
     hoveredPreviewHandle = null;
+    syncCanvasCursor(null, null);
     render();
   }
 });
@@ -2183,6 +2321,7 @@ canvas.addEventListener("pointerleave", (event) => {
     hoveredControlKey = null;
     hoveredComponentId = null;
     hoveredPreviewHandle = null;
+    syncCanvasCursor(null, null);
     render();
     return;
   }
@@ -2190,6 +2329,7 @@ canvas.addEventListener("pointerleave", (event) => {
     hoveredControlKey = null;
     hoveredComponentId = null;
     hoveredPreviewHandle = null;
+    syncCanvasCursor(null, null);
     render();
   }
 });
