@@ -2199,6 +2199,14 @@ function updateConstraintFromRow(componentId: string, element: HTMLInputElement 
 
 function getDefaultAnchor(axis: AxisKind, kind: ConstraintKind): SourceAnchor {
   if (kind === "ratio") return "ratio";
+  if (kind === "left") return "left";
+  if (kind === "right") return "right";
+  if (kind === "centerX") return "centerX";
+  if (kind === "top") return "top";
+  if (kind === "bottom") return "bottom";
+  if (kind === "centerY") return "centerY";
+  if (kind === "width") return "right";
+  if (kind === "height") return "bottom";
   return axis === "x" ? "left" : "top";
 }
 

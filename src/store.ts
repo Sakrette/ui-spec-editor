@@ -95,6 +95,42 @@ export class EditorStore {
     this.spec.components[id] = component;
     this.spec.components.root.children.push(id);
     this.selectedId = id;
+    this.addConstraint({
+      componentId: id,
+      axis: "x",
+      kind: "left",
+      sourceComponentId: null,
+      sourceAnchor: "left",
+      value: component.box.x,
+      unit: "px",
+    });
+    this.addConstraint({
+      componentId: id,
+      axis: "x",
+      kind: "width",
+      sourceComponentId: null,
+      sourceAnchor: "right",
+      value: component.box.width,
+      unit: "px",
+    });
+    this.addConstraint({
+      componentId: id,
+      axis: "y",
+      kind: "top",
+      sourceComponentId: null,
+      sourceAnchor: "top",
+      value: component.box.y,
+      unit: "px",
+    });
+    this.addConstraint({
+      componentId: id,
+      axis: "y",
+      kind: "height",
+      sourceComponentId: null,
+      sourceAnchor: "bottom",
+      value: component.box.height,
+      unit: "px",
+    });
     this.seedConstraintDrafts();
     this.solveLayout();
   }
@@ -729,6 +765,14 @@ function getConstraintKey(componentId: string, axis: "x" | "y", kind: Constraint
 
 function getDefaultSourceAnchor(axis: AxisKind, kind: ConstraintKind): SourceAnchor {
   if (kind === "ratio") return "ratio";
+  if (kind === "left") return "left";
+  if (kind === "right") return "right";
+  if (kind === "centerX") return "centerX";
+  if (kind === "top") return "top";
+  if (kind === "bottom") return "bottom";
+  if (kind === "centerY") return "centerY";
+  if (kind === "width") return "right";
+  if (kind === "height") return "bottom";
   return axis === "x" ? "left" : "top";
 }
 
