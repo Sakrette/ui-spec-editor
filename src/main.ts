@@ -449,7 +449,7 @@ function createHorizontalDimension(
       referenceB: target,
       measureA: dimSource,
       measureB: dimTarget,
-      label: formatConstraintLabel(constraint),
+      label: formatConstraintLabel(constraint, getPreviewConstraintValue(constraint, retargeting?.candidate ?? null)),
       labelBoxes,
       isRetargeting: Boolean(retargeting),
     }),
@@ -488,7 +488,7 @@ function createVerticalDimension(
       referenceB: target,
       measureA: dimSource,
       measureB: dimTarget,
-      label: formatConstraintLabel(constraint),
+      label: formatConstraintLabel(constraint, getPreviewConstraintValue(constraint, retargeting?.candidate ?? null)),
       labelBoxes,
       isRetargeting: Boolean(retargeting),
     }),
@@ -1622,6 +1622,19 @@ function getRetargetState(constraintId: string): Extract<DragState, { mode: "ret
   return dragging?.mode === "retarget" && dragging.constraintId === constraintId ? dragging : null;
 }
 
+function getPreviewConstraintValue(constraint: ConstraintSpec, candidate: RetargetCandidate | null): number {
+  if (!candidate) return constraint.value;
+  const measured = store.measureDraftConstraint({
+    componentId: constraint.componentId,
+    axis: constraint.axis,
+    kind: constraint.kind,
+    sourceComponentId: candidate.sourceComponentId,
+    sourceAnchor: candidate.sourceAnchor,
+    unit: constraint.unit,
+  });
+  return measured !== null && Number.isFinite(measured) ? measured : constraint.value;
+}
+
 function getControlAvailability(componentId: string): ControlAvailability {
   const component = store.spec.components[componentId];
   const constraints = store.spec.constraints.filter((constraint) => constraint.componentId === componentId);
@@ -1946,11 +1959,24 @@ function reserveVerticalBand(
   return x;
 }
 
-function formatConstraintLabel(constraint: ConstraintSpec): string {
+function formatConstraintLabel(constraint: ConstraintSpec, value = constraint.value): string {
+  const displayValue = getConstraintDisplayValue(constraint.kind, value);
   if (constraint.unit === "percent") {
-    return `${Math.abs(constraint.value)}%`;
+    return `${displayValue}%`;
   }
-  return `${Math.abs(constraint.value)}px`;
+  return `${displayValue}px`;
+}
+
+function getConstraintDisplayValue(kind: ConstraintKind, value: number): number {
+  return usesReverseConstraintDisplay(kind) ? -value : value;
+}
+
+function getConstraintStoredValue(kind: ConstraintKind, value: number): number {
+  return usesReverseConstraintDisplay(kind) ? -value : value;
+}
+
+function usesReverseConstraintDisplay(kind: ConstraintKind): boolean {
+  return kind === "right" || kind === "bottom";
 }
 
 function formatRatioDisplayLabel(
@@ -1966,7 +1992,7 @@ function formatRatioFromNumber(ratio: number): string {
   if (absolute >= 1000) return "1:0";
   if (absolute <= 0.001) return "0:1";
 
-  const reduced = approximateRatioParts(absolute, 5);
+  const reduced = approximateRatioParts(absolute, 5, 0.01);
   const smaller = Math.min(reduced.w, reduced.h);
 
   if (smaller <= 20) {
@@ -1977,7 +2003,7 @@ function formatRatioFromNumber(ratio: number): string {
   return `1:${trimRatio(1 / absolute)}`;
 }
 
-function approximateRatioParts(value: number, maxDepth: number): { w: number; h: number } {
+function approximateRatioParts(value: number, maxDepth: number, prec: number): { w: number; h: number } {
   if (!Number.isFinite(value) || value <= 0) return { w: 1, h: 1 };
 
   let x = value;
@@ -1998,6 +2024,7 @@ function approximateRatioParts(value: number, maxDepth: number): { w: number; h:
 
     const fraction = x - a;
     if (fraction <= 1e-9) break;
+    if (fraction / Math.max(1, Math.abs(x)) < prec) break;
     x = 1 / fraction;
   }
 
@@ -2007,7 +2034,7 @@ function approximateRatioParts(value: number, maxDepth: number): { w: number; h:
   };
 }
 
-function getRatioNearHint(constraint?: ConstraintSpec): string | null {
+function getRatioNearSuggestion(constraint?: ConstraintSpec): { display: string; apply: string } | null {
   if (!constraint || constraint.kind !== "ratio") return null;
 
   const raw = constraint.ratioParts ?? formatRatioParts(constraint.value);
@@ -2015,7 +2042,7 @@ function getRatioNearHint(constraint?: ConstraintSpec): string | null {
   const rawH = Math.max(0, Math.round(Math.abs(raw.h)));
   if (rawW === 0 || rawH === 0) return null;
 
-  const best = approximateRatioParts(Math.abs(constraint.value || 1), 5);
+  const best = approximateRatioParts(Math.abs(constraint.value || 1), 5, 0.1);
   if (best.w <= 0 || best.h <= 0) return null;
   if (Math.min(best.w, best.h) > 20) return null;
 
@@ -2026,7 +2053,20 @@ function getRatioNearHint(constraint?: ConstraintSpec): string | null {
   const nearH = best.h * nearestScale;
 
   if (nearW === rawW && nearH === rawH) return null;
-  return `${nearW}/${nearH}`;
+  return {
+    display: `${nearW}/${nearH}`,
+    apply: `${nearW}/${nearH}`,
+  };
+}
+
+function parseRatioHint(input: string): { w: number; h: number } | null {
+  const match = input.trim().match(/^(\d+)\s*\/\s*(\d+)$/);
+  if (!match) return null;
+
+  const w = Number(match[1]);
+  const h = Number(match[2]);
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null;
+  return { w, h };
 }
 
 function trimRatio(value: number): string {
@@ -2215,7 +2255,7 @@ function renderConstraintMethod(
     .map((anchor) => `<option value="${anchor}" ${constraint?.sourceAnchor === anchor ? "selected" : ""}>${formatAnchor(anchor)}</option>`)
     .join("");
   const isSizeOnly = kind === "width" || kind === "height";
-  const ratioNearHint = isRatio ? getRatioNearHint(constraint) : null;
+  const ratioNearSuggestion = isRatio ? getRatioNearSuggestion(constraint) : null;
   const fields = isRatio
       ? `
           <div class="method-fields" ${expanded ? "" : "hidden"}>
@@ -2262,7 +2302,7 @@ function renderConstraintMethod(
                   data-kind="${kind}"
                   type="number"
                   step="1"
-                  value="${constraint?.value ?? 0}"
+                  value="${constraint ? getConstraintDisplayValue(kind, constraint.value) : 0}"
                 />
               </label>
               <label class="field">
@@ -2301,7 +2341,7 @@ function renderConstraintMethod(
                 data-kind="${kind}"
                 type="number"
                 step="1"
-                value="${constraint?.value ?? 0}"
+                value="${constraint ? getConstraintDisplayValue(kind, constraint.value) : 0}"
               />
             </label>
             <label class="field">
@@ -2330,7 +2370,7 @@ function renderConstraintMethod(
           />
           <span>${kind}</span>
         </label>
-        ${ratioNearHint ? `<span class="ratio-near">near: ${ratioNearHint}</span>` : ""}
+        ${ratioNearSuggestion ? `<button type="button" class="ratio-near" data-role="apply-near-ratio" data-component="${componentId}" data-axis="${axis}" data-kind="${kind}" data-ratio="${ratioNearSuggestion.apply}">near: ${ratioNearSuggestion.display}</button>` : ""}
         ${enabled ? `
           <label class="method-lock">
           <input
@@ -2421,9 +2461,34 @@ function bindConstraintEditors(componentId: string): void {
     });
   }
 
+  for (const button of selectedPane.querySelectorAll<HTMLButtonElement>('button[data-role="apply-near-ratio"]')) {
+    button.addEventListener("click", () => {
+      const axis = button.dataset.axis as AxisKind;
+      const kind = button.dataset.kind as ConstraintKind;
+      const ratio = button.dataset.ratio;
+      if (kind !== "ratio" || !ratio) return;
+
+      const parts = parseRatioHint(ratio);
+      if (!parts) return;
+
+      store.upsertConstraint({
+        componentId,
+        axis,
+        kind,
+        sourceComponentId: componentId,
+        sourceAnchor: "ratio",
+        value: parseRatioParts(String(parts.w), String(parts.h)),
+        unit: "ratio",
+        locked: selectedPane.querySelector<HTMLInputElement>(`[data-role="lock"][data-axis="${axis}"][data-kind="${kind}"]`)?.checked ?? false,
+        ratioParts: parts,
+      });
+      render();
+    });
+  }
+
   for (const field of selectedPane.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-role]")) {
     const role = field.dataset.role;
-    if (!role || role === "toggle" || role === "lock") continue;
+    if (!role || role === "toggle" || role === "lock" || role === "apply-near-ratio") continue;
     field.addEventListener("input", () => updateConstraintFromRow(componentId, field));
     field.addEventListener("change", () => updateConstraintFromRow(componentId, field));
   }
@@ -2445,7 +2510,7 @@ function updateConstraintFromRow(componentId: string, element: HTMLInputElement 
   let resolvedValue =
     kind === "ratio"
       ? parseRatioParts(ratioW?.value ?? "1", ratioH?.value ?? "1")
-      : Number(value?.value ?? 0);
+      : getConstraintStoredValue(kind, Number(value?.value ?? 0));
   const ratioParts =
     kind === "ratio"
       ? {
@@ -2466,7 +2531,7 @@ function updateConstraintFromRow(componentId: string, element: HTMLInputElement 
       });
       if (measured !== null && Number.isFinite(measured)) {
         if (value) {
-          value.value = String(measured);
+          value.value = String(getConstraintDisplayValue(kind, measured));
         }
         resolvedValue = measured;
       }
@@ -2486,7 +2551,54 @@ function updateConstraintFromRow(componentId: string, element: HTMLInputElement 
 
   renderCanvas();
   renderComponentList();
+  syncSelectedConstraintHint(componentId, axis, kind);
   syncExportState();
+}
+
+function syncSelectedConstraintHint(componentId: string, axis: AxisKind, kind: ConstraintKind): void {
+  if (kind !== "ratio") return;
+
+  const methodKey = getMethodKey(componentId, axis, kind);
+  const methodCard = selectedPane.querySelector<HTMLElement>(`[data-method-card="${methodKey}"]`);
+  if (!methodCard) return;
+
+  const existingHint = methodCard.querySelector<HTMLElement>(".ratio-near");
+  const constraint = store.spec.constraints.find(
+    (item) => item.componentId === componentId && item.axis === axis && item.kind === kind,
+  );
+  const nextHint = getRatioNearSuggestion(constraint);
+
+  if (!nextHint) {
+    existingHint?.remove();
+    return;
+  }
+
+  if (existingHint) {
+    existingHint.textContent = `near: ${nextHint.display}`;
+    existingHint.setAttribute("data-ratio", nextHint.apply);
+    return;
+  }
+
+  const headRow = methodCard.querySelector<HTMLElement>(".method-head-row");
+  const lockLabel = methodCard.querySelector<HTMLElement>(".method-lock");
+  if (!headRow) return;
+
+  const hint = document.createElement("button");
+  hint.type = "button";
+  hint.className = "ratio-near";
+  hint.textContent = `near: ${nextHint.display}`;
+  hint.dataset.role = "apply-near-ratio";
+  hint.dataset.component = componentId;
+  hint.dataset.axis = axis;
+  hint.dataset.kind = kind;
+  hint.dataset.ratio = nextHint.apply;
+
+  if (lockLabel) {
+    headRow.insertBefore(hint, lockLabel);
+    return;
+  }
+
+  headRow.appendChild(hint);
 }
 
 function commitRetargetConstraint(constraintId: string, candidate: RetargetCandidate | null): void {
