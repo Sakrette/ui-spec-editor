@@ -17,6 +17,13 @@ app.innerHTML = `
         <button id="open-export-modal" type="button">Export</button>
       </div>
       <section class="panel">
+        <h2>Preferences</h2>
+        <label class="toggle-row">
+          <input id="auto-detect-closest-on-move" type="checkbox" />
+          <span>Auto detect closest while moving</span>
+        </label>
+      </section>
+      <section class="panel">
         <h2>Viewport</h2>
         <div class="field-grid">
           <label class="field">
@@ -36,12 +43,6 @@ app.innerHTML = `
       </section>
     </aside>
     <section class="workspace">
-      <div class="workspace-header">
-        <div>
-          <strong>Canvas</strong>
-          <span id="canvas-size"></span>
-        </div>
-      </div>
       <svg id="canvas" viewBox="0 0 960 540" aria-label="Editor canvas"></svg>
     </section>
     <aside class="inspector-column">
@@ -122,7 +123,7 @@ const closeImportModalButton = query<HTMLButtonElement>("#close-import-modal");
 const closeExportModalButton = query<HTMLButtonElement>("#close-export-modal");
 const viewportWidthInput = query<HTMLInputElement>("#viewport-width");
 const viewportHeightInput = query<HTMLInputElement>("#viewport-height");
-const canvasSize = query<HTMLSpanElement>("#canvas-size");
+const autoDetectClosestOnMoveInput = query<HTMLInputElement>("#auto-detect-closest-on-move");
 const addComponentButton = query<HTMLButtonElement>("#add-component-button");
 const exportModal = query<HTMLDivElement>("#export-modal");
 const importModal = query<HTMLDivElement>("#import-modal");
@@ -189,6 +190,7 @@ let expandedMethodKey: string | null = null;
 let hoveredControlKey: string | null = null;
 let hoveredComponentId: string | null = null;
 let hoveredPreviewHandle: ControlHandle | null = null;
+let autoDetectClosestOnMove = false;
 
 function render(): void {
   renderViewportControls();
@@ -206,7 +208,7 @@ function syncExportState(): void {
 function renderViewportControls(): void {
   viewportWidthInput.value = String(store.spec.viewport.width);
   viewportHeightInput.value = String(store.spec.viewport.height);
-  canvasSize.textContent = `${store.spec.viewport.width} x ${store.spec.viewport.height}`;
+  autoDetectClosestOnMoveInput.checked = autoDetectClosestOnMove;
   canvas.setAttribute("viewBox", `0 0 ${store.spec.viewport.width} ${store.spec.viewport.height}`);
 }
 
@@ -3101,6 +3103,11 @@ addComponentButton.addEventListener("click", () => {
   render();
 });
 
+autoDetectClosestOnMoveInput.addEventListener("change", () => {
+  autoDetectClosestOnMove = autoDetectClosestOnMoveInput.checked;
+  renderViewportControls();
+});
+
 viewportWidthInput.addEventListener("input", () => {
   store.resizeViewport(Number(viewportWidthInput.value), store.spec.viewport.height);
   render();
@@ -3158,6 +3165,9 @@ canvas.addEventListener("pointermove", (event) => {
       width: activeDrag.startBox.width,
       height: activeDrag.startBox.height,
     });
+    if (autoDetectClosestOnMove) {
+      applyClosestReferenceTarget(activeDrag.id);
+    }
   } else if (activeDrag.mode === "resize") {
     store.setComponentBox(activeDrag.id, getResizedBox(activeDrag.startBox, activeDrag.handle, dx, dy));
   } else {
