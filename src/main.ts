@@ -159,8 +159,21 @@ type ControlAvailability = {
   canResizeRight: boolean;
   canResizeTop: boolean;
   canResizeBottom: boolean;
+  canResizeNW: boolean;
+  canResizeNE: boolean;
+  canResizeSW: boolean;
+  canResizeSE: boolean;
   widthFixed: boolean;
   heightFixed: boolean;
+};
+
+type LinearTerm = { a: number; b: number };
+type OperationDelta = {
+  dimensions: 1 | 2;
+  dl: LinearTerm;
+  dr: LinearTerm;
+  dt: LinearTerm;
+  db: LinearTerm;
 };
 
 const ANNOTATION_FONT_SIZE = 12;
@@ -281,8 +294,12 @@ function createComponentElement(component: ComponentNode, isUnderConstrained: bo
   element.setAttribute("data-component-id", component.id);
   element.addEventListener("pointerdown", (event) => {
     const pointerEvent = event as PointerEvent;
+    if (dragging?.mode === "retarget") return;
     pointerEvent.stopPropagation();
     store.select(component.id);
+    hoveredControlKey = getHandleControlKey(component.id, "move");
+    hoveredComponentId = null;
+    hoveredPreviewHandle = null;
     dragging = {
       mode: "move",
       id: component.id,
@@ -326,10 +343,10 @@ function isHandleAvailable(handle: ControlHandle, availability: ControlAvailabil
   if (handle === "e") return availability.canResizeRight;
   if (handle === "n") return availability.canResizeTop;
   if (handle === "s") return availability.canResizeBottom;
-  if (handle === "nw") return availability.canResizeLeft && availability.canResizeTop;
-  if (handle === "ne") return availability.canResizeRight && availability.canResizeTop;
-  if (handle === "sw") return availability.canResizeLeft && availability.canResizeBottom;
-  if (handle === "se") return availability.canResizeRight && availability.canResizeBottom;
+  if (handle === "nw") return availability.canResizeNW;
+  if (handle === "ne") return availability.canResizeNE;
+  if (handle === "sw") return availability.canResizeSW;
+  if (handle === "se") return availability.canResizeSE;
   return false;
 }
 
@@ -955,7 +972,7 @@ function createConstraintArrowControl(
 ): SVGPathElement | null {
   const availability = getControlAvailability(constraint.componentId);
   if (constraint.locked) return null;
-  if (ratio && availability.widthFixed && availability.heightFixed) return null;
+  if (ratio && !availability.canResizeNE) return null;
   if (constraint.kind === "left" && !availability.canResizeLeft) return null;
   if (constraint.kind === "right" && !availability.canResizeRight) return null;
   if (constraint.kind === "centerX" && !availability.canMoveX) return null;
@@ -982,8 +999,11 @@ function createConstraintArrowControl(
   path.style.cursor = getDirectionalResizeCursor(direction);
   path.addEventListener("pointerdown", (event) => {
     const pointerEvent = event as PointerEvent;
+    if (dragging?.mode === "retarget") return;
     pointerEvent.stopPropagation();
     hoveredControlKey = key;
+    hoveredComponentId = null;
+    hoveredPreviewHandle = null;
     store.select(constraint.componentId);
     dragging = {
       mode: "constraint",
@@ -1022,6 +1042,8 @@ function createReferenceRetargetControl(
     const mouseEvent = event as MouseEvent;
     mouseEvent.stopPropagation();
     hoveredControlKey = getRetargetControlKey(constraint.id);
+    hoveredComponentId = null;
+    hoveredPreviewHandle = null;
     store.select(constraint.componentId);
     dragging = {
       mode: "retarget",
@@ -1414,8 +1436,11 @@ function createControlHandle(
   node.style.cursor = cursor;
   node.addEventListener("pointerdown", (event) => {
     const pointerEvent = event as PointerEvent;
+    if (dragging?.mode === "retarget") return;
     pointerEvent.stopPropagation();
     hoveredControlKey = key;
+    hoveredComponentId = null;
+    hoveredPreviewHandle = null;
     store.select(component.id);
     dragging =
       handle === "move"
@@ -1479,8 +1504,12 @@ function createHandleOutlineHit(box: Box, componentId: string): SVGRectElement {
     const pointerEvent = event as PointerEvent;
     const component = store.spec.components[componentId];
     if (!component || component.id === "root") return;
+    if (dragging?.mode === "retarget") return;
     pointerEvent.stopPropagation();
     store.select(componentId);
+    hoveredControlKey = getHandleControlKey(componentId, "move");
+    hoveredComponentId = null;
+    hoveredPreviewHandle = null;
     dragging = {
       mode: "move",
       id: componentId,
@@ -1568,6 +1597,9 @@ function getPreviewComponentId(): string | null {
   if (dragging?.mode === "move" || dragging?.mode === "resize") {
     return dragging.id;
   }
+  if (dragging?.mode === "constraint" || dragging?.mode === "retarget") {
+    return null;
+  }
   return hoveredComponentId;
 }
 
@@ -1591,84 +1623,158 @@ function getRetargetState(constraintId: string): Extract<DragState, { mode: "ret
 }
 
 function getControlAvailability(componentId: string): ControlAvailability {
+  const component = store.spec.components[componentId];
   const constraints = store.spec.constraints.filter((constraint) => constraint.componentId === componentId);
-  const xLocks = getAxisLockSummary(constraints, "x");
-  const yLocks = getAxisLockSummary(constraints, "y");
-  const ratioLocked = constraints.some((constraint) => constraint.kind === "ratio" && constraint.locked);
-
-  let widthFixed = xLocks.widthFixedBase;
-  let heightFixed = yLocks.heightFixedBase;
-  if (ratioLocked) {
-    widthFixed ||= heightFixed;
-    heightFixed ||= widthFixed;
+  if (!component || component.id === "root") {
+    return {
+      canMoveX: false,
+      canMoveY: false,
+      canResizeLeft: false,
+      canResizeRight: false,
+      canResizeTop: false,
+      canResizeBottom: false,
+      canResizeNW: false,
+      canResizeNE: false,
+      canResizeSW: false,
+      canResizeSE: false,
+      widthFixed: true,
+      heightFixed: true,
+    };
   }
 
-  const leftFixed =
-    xLocks.leftLocked ||
-    (xLocks.rightLocked && xLocks.centerLocked) ||
-    (xLocks.rightLocked && widthFixed) ||
-    (xLocks.centerLocked && widthFixed);
-
-  const rightFixed =
-    xLocks.rightLocked ||
-    (xLocks.leftLocked && xLocks.centerLocked) ||
-    (xLocks.leftLocked && widthFixed) ||
-    (xLocks.centerLocked && widthFixed);
-
-  const topFixed =
-    yLocks.topLocked ||
-    (yLocks.bottomLocked && yLocks.centerLocked) ||
-    (yLocks.bottomLocked && heightFixed) ||
-    (yLocks.centerLocked && heightFixed);
-
-  const bottomFixed =
-    yLocks.bottomLocked ||
-    (yLocks.topLocked && yLocks.centerLocked) ||
-    (yLocks.topLocked && heightFixed) ||
-    (yLocks.centerLocked && heightFixed);
+  const canMoveX = canApplyLockedOperation(component, constraints, createMoveXOperation());
+  const canMoveY = canApplyLockedOperation(component, constraints, createMoveYOperation());
+  const canResizeLeft = canApplyLockedOperation(component, constraints, createHorizontalResizeOperation("left"));
+  const canResizeRight = canApplyLockedOperation(component, constraints, createHorizontalResizeOperation("right"));
+  const canResizeTop = canApplyLockedOperation(component, constraints, createVerticalResizeOperation("top"));
+  const canResizeBottom = canApplyLockedOperation(component, constraints, createVerticalResizeOperation("bottom"));
+  const canResizeNW = canApplyLockedOperation(component, constraints, createCornerResizeOperation("nw"));
+  const canResizeNE = canApplyLockedOperation(component, constraints, createCornerResizeOperation("ne"));
+  const canResizeSW = canApplyLockedOperation(component, constraints, createCornerResizeOperation("sw"));
+  const canResizeSE = canApplyLockedOperation(component, constraints, createCornerResizeOperation("se"));
+  const widthFixed = !canResizeLeft && !canResizeRight;
+  const heightFixed = !canResizeTop && !canResizeBottom;
 
   return {
-    canMoveX: !(xLocks.centerLocked || leftFixed || rightFixed),
-    canMoveY: !(yLocks.centerLocked || topFixed || bottomFixed),
-    canResizeLeft: !(leftFixed || widthFixed),
-    canResizeRight: !(rightFixed || widthFixed),
-    canResizeTop: !(topFixed || heightFixed),
-    canResizeBottom: !(bottomFixed || heightFixed),
+    canMoveX,
+    canMoveY,
+    canResizeLeft,
+    canResizeRight,
+    canResizeTop,
+    canResizeBottom,
+    canResizeNW,
+    canResizeNE,
+    canResizeSW,
+    canResizeSE,
     widthFixed,
     heightFixed,
   };
 }
 
-function getAxisLockSummary(
-  constraints: ConstraintSpec[],
-  axis: AxisKind,
-): {
-  leftLocked: boolean;
-  rightLocked: boolean;
-  centerLocked: boolean;
-  widthFixedBase: boolean;
-  topLocked: boolean;
-  bottomLocked: boolean;
-  heightFixedBase: boolean;
-} {
-  const axisConstraints = constraints.filter((constraint) => constraint.axis === axis && constraint.locked);
-  const kinds = new Set(axisConstraints.map((constraint) => constraint.kind));
-  const leftLocked = kinds.has("left");
-  const rightLocked = kinds.has("right");
-  const centerLocked = kinds.has(axis === "x" ? "centerX" : "centerY");
-  const sizeLocked = kinds.has(axis === "x" ? "width" : "height");
-  const ordinaryLockedCount = [leftLocked, rightLocked, centerLocked, sizeLocked].filter(Boolean).length;
-  const axisFixed = ordinaryLockedCount >= 2;
+function createLinearTerm(a = 0, b = 0): LinearTerm {
+  return { a, b };
+}
 
+function createMoveXOperation(): OperationDelta {
   return {
-    leftLocked: axis === "x" ? leftLocked || axisFixed : false,
-    rightLocked: axis === "x" ? rightLocked || axisFixed : false,
-    centerLocked: centerLocked || axisFixed,
-    widthFixedBase: axis === "x" ? sizeLocked || axisFixed : false,
-    topLocked: axis === "y" ? leftLocked || axisFixed : false,
-    bottomLocked: axis === "y" ? rightLocked || axisFixed : false,
-    heightFixedBase: axis === "y" ? sizeLocked || axisFixed : false,
+    dimensions: 1,
+    dl: createLinearTerm(1),
+    dr: createLinearTerm(1),
+    dt: createLinearTerm(),
+    db: createLinearTerm(),
   };
+}
+
+function createMoveYOperation(): OperationDelta {
+  return {
+    dimensions: 1,
+    dl: createLinearTerm(),
+    dr: createLinearTerm(),
+    dt: createLinearTerm(1),
+    db: createLinearTerm(1),
+  };
+}
+
+function createHorizontalResizeOperation(side: "left" | "right"): OperationDelta {
+  return {
+    dimensions: 1,
+    dl: side === "left" ? createLinearTerm(1) : createLinearTerm(),
+    dr: side === "right" ? createLinearTerm(1) : createLinearTerm(),
+    dt: createLinearTerm(),
+    db: createLinearTerm(),
+  };
+}
+
+function createVerticalResizeOperation(side: "top" | "bottom"): OperationDelta {
+  return {
+    dimensions: 1,
+    dl: createLinearTerm(),
+    dr: createLinearTerm(),
+    dt: side === "top" ? createLinearTerm(1) : createLinearTerm(),
+    db: side === "bottom" ? createLinearTerm(1) : createLinearTerm(),
+  };
+}
+
+function createCornerResizeOperation(handle: "nw" | "ne" | "sw" | "se"): OperationDelta {
+  return {
+    dimensions: 2,
+    dl: handle.includes("w") ? createLinearTerm(1, 0) : createLinearTerm(),
+    dr: handle.includes("e") ? createLinearTerm(1, 0) : createLinearTerm(),
+    dt: handle.includes("n") ? createLinearTerm(0, 1) : createLinearTerm(),
+    db: handle.includes("s") ? createLinearTerm(0, 1) : createLinearTerm(),
+  };
+}
+
+function canApplyLockedOperation(
+  component: ComponentNode,
+  constraints: ConstraintSpec[],
+  operation: OperationDelta,
+): boolean {
+  const rows = constraints
+    .filter((constraint) => constraint.locked)
+    .map((constraint) => getLockedConstraintEquation(constraint, component, operation))
+    .filter((row): row is [number, number] => row !== null);
+  return getEquationRank(rows) < operation.dimensions;
+}
+
+function getLockedConstraintEquation(
+  constraint: ConstraintSpec,
+  component: ComponentNode,
+  operation: OperationDelta,
+): [number, number] | null {
+  const { dl, dr, dt, db } = operation;
+  if (constraint.kind === "left") return [dl.a, dl.b];
+  if (constraint.kind === "right") return [dr.a, dr.b];
+  if (constraint.kind === "centerX") return [dl.a + dr.a, dl.b + dr.b];
+  if (constraint.kind === "width") return [dr.a - dl.a, dr.b - dl.b];
+  if (constraint.kind === "top") return [dt.a, dt.b];
+  if (constraint.kind === "bottom") return [db.a, db.b];
+  if (constraint.kind === "centerY") return [dt.a + db.a, dt.b + db.b];
+  if (constraint.kind === "height") return [db.a - dt.a, db.b - dt.b];
+  if (constraint.kind === "ratio") {
+    const width = Math.max(1, component.box.width);
+    const height = Math.max(1, component.box.height);
+    return [
+      height * (dr.a - dl.a) - width * (db.a - dt.a),
+      height * (dr.b - dl.b) - width * (db.b - dt.b),
+    ];
+  }
+  return null;
+}
+
+function getEquationRank(rows: Array<[number, number]>): 0 | 1 | 2 {
+  let basis: [number, number] | null = null;
+  for (const [x, y] of rows) {
+    if (x === 0 && y === 0) continue;
+    if (!basis) {
+      basis = [x, y];
+      continue;
+    }
+    if (basis[0] * y !== basis[1] * x) {
+      return 2;
+    }
+  }
+  return basis ? 1 : 0;
 }
 
 function getConstraintControlSpecs(
@@ -1681,39 +1787,23 @@ function getConstraintControlSpecs(
 ): Array<{ tip: Vec2; direction: Vec2; valueScale: number }> {
   const availability = getControlAvailability(constraint.componentId);
   if (constraint.kind === "width") {
-    const kinds = store.spec.constraints
+    const pairedKinds = store.spec.constraints
       .filter(
         (item) => item.componentId === constraint.componentId && item.axis === axis && item.kind !== "width" && item.id !== constraint.id,
       )
       .map((item) => item.kind);
-    const leftConstrained = kinds.includes("left");
-    const rightConstrained = kinds.includes("right");
-    const controls: Array<{ tip: Vec2; direction: Vec2; valueScale: number }> = [];
-    if (!leftConstrained && availability.canResizeLeft) {
-      controls.push({ tip: start, direction: dir, valueScale: -1 });
-    }
-    if (!rightConstrained && availability.canResizeRight) {
-      controls.push({ tip: end, direction: scale(dir, -1), valueScale: 1 });
-    }
-    return controls;
+    const keepsXFixed = pairedKinds.includes("left");
+    return keepsXFixed && availability.canResizeRight ? [{ tip: end, direction: scale(dir, -1), valueScale: 1 }] : [];
   }
 
   if (constraint.kind === "height") {
-    const kinds = store.spec.constraints
+    const pairedKinds = store.spec.constraints
       .filter(
         (item) => item.componentId === constraint.componentId && item.axis === axis && item.kind !== "height" && item.id !== constraint.id,
       )
       .map((item) => item.kind);
-    const bottomConstrained = kinds.includes("bottom");
-    const topConstrained = kinds.includes("top");
-    const controls: Array<{ tip: Vec2; direction: Vec2; valueScale: number }> = [];
-    if (!bottomConstrained && availability.canResizeBottom) {
-      controls.push({ tip: start, direction: dir, valueScale: 1 });
-    }
-    if (!topConstrained && availability.canResizeTop) {
-      controls.push({ tip: end, direction: scale(dir, -1), valueScale: -1 });
-    }
-    return controls;
+    const keepsYFixed = pairedKinds.includes("top");
+    return keepsYFixed && availability.canResizeBottom ? [{ tip: start, direction: dir, valueScale: 1 }] : [];
   }
 
   if (constraint.kind === "left" && !availability.canResizeLeft) return [];
@@ -1722,7 +1812,7 @@ function getConstraintControlSpecs(
   if (constraint.kind === "top" && !availability.canResizeTop) return [];
   if (constraint.kind === "bottom" && !availability.canResizeBottom) return [];
   if (constraint.kind === "centerY" && !availability.canMoveY) return [];
-  if (constraint.kind === "ratio" && availability.widthFixed && availability.heightFixed) return [];
+  if (constraint.kind === "ratio" && !availability.canResizeNE) return [];
 
   const direction = targetTip === end ? scale(dir, -1) : dir;
   return [{ tip: targetTip, direction, valueScale: 1 }];
@@ -2468,7 +2558,9 @@ canvas.addEventListener("pointermove", (event) => {
   if (!dragging) {
     const target = event.target as Element | null;
     const nextHover = target?.closest<HTMLElement>("[data-control-key]")?.dataset.controlKey ?? null;
-    const nextHoveredComponent = target?.closest<HTMLElement>("[data-component-id]")?.dataset.componentId ?? null;
+    const nextHoveredComponent = nextHover
+      ? null
+      : target?.closest<HTMLElement>("[data-component-id]")?.dataset.componentId ?? null;
     const nextPreviewHandle =
       nextHoveredComponent
         ? getPreviewHandleForPoint(store.spec.components[nextHoveredComponent], getCanvasPoint(event))
