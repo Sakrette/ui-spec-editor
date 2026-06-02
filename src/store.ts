@@ -4,6 +4,7 @@ import type { AxisKind, ComponentNode, ConstraintSpec, ConstraintKind, ProjectSp
 export class EditorStore {
   private nextId = 1;
   private constraintDrafts = new Map<string, Omit<ConstraintSpec, "id">>();
+  private referencePreferences = new Map<string, string>();
 
   public spec: ProjectSpec = {
     version: "0.1",
@@ -153,6 +154,7 @@ export class EditorStore {
         this.constraintDrafts.delete(getConstraintKey(component.id, axis, kind));
       }
     }
+    this.referencePreferences.delete(component.id);
 
     this.selectedId = null;
     this.solveLayout();
@@ -275,6 +277,14 @@ export class EditorStore {
 
   public getConstraintDraft(componentId: string, axis: "x" | "y", kind: ConstraintKind): Omit<ConstraintSpec, "id"> | null {
     return this.constraintDrafts.get(getConstraintKey(componentId, axis, kind)) ?? null;
+  }
+
+  public getReferencePreference(componentId: string): string | null {
+    return this.referencePreferences.get(componentId) ?? null;
+  }
+
+  public setReferencePreference(componentId: string, preference: string): void {
+    this.referencePreferences.set(componentId, preference);
   }
 
   public updateConstraintDraftReference(
@@ -702,6 +712,7 @@ export class EditorStore {
     this.spec = normalizeImportedSpec(parsed);
     this.selectedId = null;
     this.constraintDrafts.clear();
+    this.referencePreferences.clear();
     this.seedConstraintDrafts();
     for (const constraint of this.spec.constraints) {
       this.rememberConstraintDraft(constraint);

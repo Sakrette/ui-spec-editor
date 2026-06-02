@@ -189,7 +189,6 @@ let expandedMethodKey: string | null = null;
 let hoveredControlKey: string | null = null;
 let hoveredComponentId: string | null = null;
 let hoveredPreviewHandle: ControlHandle | null = null;
-let referencePickerOpenFor: string | null = null;
 
 function render(): void {
   renderViewportControls();
@@ -2150,7 +2149,6 @@ function renderComponentList(): void {
 function renderSelectedPane(): void {
   const selected = store.selectedId ? store.spec.components[store.selectedId] : null;
   if (!selected) {
-    referencePickerOpenFor = null;
     selectedPane.textContent = "No component selected";
     return;
   }
@@ -2185,7 +2183,7 @@ function renderSelectedPane(): void {
       <div class="axis-pill is-${xStatus?.status ?? "under"}">x: ${xStatus?.usedKinds.length ?? 0}/2</div>
       <div class="axis-pill is-${yStatus?.status ?? "under"}">y: ${yStatus?.usedKinds.length ?? 0}/2</div>
     </div>
-    ${renderReferenceSetter(selected.id)}
+    ${renderReferenceSelector(selected.id)}
     <div class="constraint-editor">
       ${renderAxisEditor(selected.id, "x")}
       ${renderAxisEditor(selected.id, "y")}
@@ -2196,35 +2194,27 @@ bindSelectedInputs();
   bindConstraintEditors(selected.id);
 }
 
-function renderReferenceSetter(componentId: string): string {
+function renderReferenceSelector(componentId: string): string {
   const options = buildReferenceTargetOptions(componentId);
   if (options.length <= 2) return "";
-  const expanded = referencePickerOpenFor === componentId;
 
   return `
-    <div class="reference-picker">
-      <button id="toggle-reference-picker" class="reference-picker-toggle" type="button" aria-expanded="${expanded ? "true" : "false"}">
-        Set Reference
-      </button>
-      <div class="reference-picker-popover" ${expanded ? "" : "hidden"}>
-        <label class="field">
-          <span>Target</span>
-          <select id="reference-target">
-            ${options.join("")}
-          </select>
-        </label>
-        <button id="apply-reference-target" type="button">Apply</button>
-        <p class="hint">Only position constraints change. Closest only considers targets whose projected range overlaps on the other axis; it prefers the nearest allowed positive offset, otherwise falls back to the matching anchor. Width, height, and ratio stay unchanged.</p>
-      </div>
+    <div class="reference-controls">
+      <label class="field reference-selector">
+        <span>Reference</span>
+        <select id="reference-target">
+          ${options.join("")}
+        </select>
+      </label>
+      <button id="detect-closest-reference" class="reference-detect-button" type="button">Detect Closest</button>
     </div>
   `;
 }
 
 function buildReferenceTargetOptions(componentId: string): string[] {
-  const preferred = getPreferredReferenceTarget(componentId);
+  const preferred = getDisplayedReferencePreference(componentId);
   const options = [
     `<option value="viewport" ${preferred === "viewport" ? "selected" : ""}>Global</option>`,
-    `<option value="closest" ${preferred === "closest" ? "selected" : ""}>Closest</option>`,
   ];
 
   for (const component of store.components) {
@@ -2233,11 +2223,23 @@ function buildReferenceTargetOptions(componentId: string): string[] {
     options.push(`<option value="${component.id}" ${preferred === component.id ? "selected" : ""}>${component.name}</option>`);
   }
 
+  options.push(`<option value="custom" ${preferred === "custom" ? "selected" : ""}>Custom</option>`);
+
   return options;
 }
 
-function getPreferredReferenceTarget(componentId: string): string {
+function getDisplayedReferencePreference(componentId: string): string {
+  const explicit = store.getReferencePreference(componentId);
+  if (explicit && explicit !== "closest") return explicit;
+  return getReferencePreferenceFromConstraints(componentId);
+}
+
+function getReferencePreferenceFromConstraints(componentId: string): string {
   const active = getBulkReferenceConstraints(componentId);
+  if (active.length === 0) {
+    const component = store.spec.components[componentId];
+    return component?.parentId ?? "viewport";
+  }
   const counts = new Map<string, number>();
 
   for (const constraint of active) {
@@ -2245,11 +2247,7 @@ function getPreferredReferenceTarget(componentId: string): string {
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
 
-  const preferred = Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0];
-  if (preferred) return preferred;
-
-  const component = store.spec.components[componentId];
-  return component?.parentId ?? "viewport";
+  return counts.size === 1 ? (Array.from(counts.keys())[0] ?? "viewport") : "custom";
 }
 
 function getReferenceTargetCandidates(componentId: string): Array<string | null> {
@@ -2572,6 +2570,10 @@ function syncReferenceDraft(componentId: string, axis: AxisKind, kind: Constrain
   store.updateConstraintDraftReference(componentId, axis, kind, sourceComponentId, sourceAnchor);
 }
 
+function syncReferencePreferenceFromConstraints(componentId: string): void {
+  store.setReferencePreference(componentId, getReferencePreferenceFromConstraints(componentId));
+}
+
 function applyReferenceTargetToComponent(componentId: string, sourceComponentId: string | null): void {
   const constraints = getBulkReferenceConstraints(componentId);
   for (const constraint of constraints) {
@@ -2601,6 +2603,7 @@ function applyReferenceTargetToComponent(componentId: string, sourceComponentId:
       syncReferenceDraft(componentId, axis, kind, sourceComponentId, anchor);
     }
   }
+  store.setReferencePreference(componentId, sourceComponentId ?? "viewport");
 }
 
 function applyClosestReferenceTarget(componentId: string): void {
@@ -2708,6 +2711,7 @@ function applyClosestReferenceTarget(componentId: string): void {
       }
     }
   }
+  store.setReferencePreference(componentId, "closest");
 }
 
 function isReferenceConstraintKind(kind: ConstraintKind): boolean {
@@ -2831,26 +2835,25 @@ function bindSelectedInputs(): void {
     syncExportState();
   });
 
-  const toggleReferenceTargetButton = selectedPane.querySelector<HTMLButtonElement>("#toggle-reference-picker");
-  const applyReferenceTargetButton = selectedPane.querySelector<HTMLButtonElement>("#apply-reference-target");
   const referenceTargetSelect = selectedPane.querySelector<HTMLSelectElement>("#reference-target");
-  if (toggleReferenceTargetButton && store.selectedId) {
-    toggleReferenceTargetButton.addEventListener("click", () => {
-      referencePickerOpenFor = referencePickerOpenFor === store.selectedId ? null : store.selectedId;
-      renderSelectedPane();
+  const detectClosestReferenceButton = selectedPane.querySelector<HTMLButtonElement>("#detect-closest-reference");
+  if (referenceTargetSelect && store.selectedId) {
+    referenceTargetSelect.addEventListener("change", () => {
+      if (referenceTargetSelect.value === "custom") {
+        store.setReferencePreference(store.selectedId as string, "custom");
+        renderSelectedPane();
+        return;
+      }
+      applyReferenceTargetToComponent(
+        store.selectedId as string,
+        referenceTargetSelect.value === "viewport" ? null : referenceTargetSelect.value,
+      );
+      render();
     });
   }
-  if (applyReferenceTargetButton && referenceTargetSelect && store.selectedId) {
-    applyReferenceTargetButton.addEventListener("click", () => {
-      if (referenceTargetSelect.value === "closest") {
-        applyClosestReferenceTarget(store.selectedId as string);
-      } else {
-        applyReferenceTargetToComponent(
-          store.selectedId as string,
-          referenceTargetSelect.value === "viewport" ? null : referenceTargetSelect.value,
-        );
-      }
-      referencePickerOpenFor = null;
+  if (detectClosestReferenceButton && store.selectedId) {
+    detectClosestReferenceButton.addEventListener("click", () => {
+      applyClosestReferenceTarget(store.selectedId as string);
       render();
     });
   }
@@ -2882,6 +2885,9 @@ function bindConstraintEditors(componentId: string): void {
         if (expandedMethodKey === methodKey) {
           expandedMethodKey = null;
         }
+      }
+      if (isReferenceConstraintKind(kind) && store.getReferencePreference(componentId) !== "closest") {
+        syncReferencePreferenceFromConstraints(componentId);
       }
       render();
     });
@@ -2983,6 +2989,10 @@ function updateConstraintFromRow(componentId: string, element: HTMLInputElement 
     locked,
     ratioParts,
   });
+
+  if (isReferenceConstraintKind(kind)) {
+    syncReferencePreferenceFromConstraints(componentId);
+  }
 
   renderCanvas();
   renderComponentList();
