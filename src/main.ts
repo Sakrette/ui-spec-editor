@@ -189,6 +189,7 @@ let expandedMethodKey: string | null = null;
 let hoveredControlKey: string | null = null;
 let hoveredComponentId: string | null = null;
 let hoveredPreviewHandle: ControlHandle | null = null;
+let referencePickerOpenFor: string | null = null;
 
 function render(): void {
   renderViewportControls();
@@ -1960,7 +1961,7 @@ function reserveVerticalBand(
 }
 
 function formatConstraintLabel(constraint: ConstraintSpec, value = constraint.value): string {
-  const displayValue = getConstraintDisplayValue(constraint.kind, value);
+  const displayValue = Math.abs(getConstraintDisplayValue(constraint.kind, value));
   if (constraint.unit === "percent") {
     return `${displayValue}%`;
   }
@@ -1977,6 +1978,10 @@ function getConstraintStoredValue(kind: ConstraintKind, value: number): number {
 
 function usesReverseConstraintDisplay(kind: ConstraintKind): boolean {
   return kind === "right" || kind === "bottom";
+}
+
+function getConstraintOrientedValue(kind: ConstraintKind, value: number): number {
+  return getConstraintDisplayValue(kind, value);
 }
 
 function formatRatioDisplayLabel(
@@ -2145,6 +2150,7 @@ function renderComponentList(): void {
 function renderSelectedPane(): void {
   const selected = store.selectedId ? store.spec.components[store.selectedId] : null;
   if (!selected) {
+    referencePickerOpenFor = null;
     selectedPane.textContent = "No component selected";
     return;
   }
@@ -2179,6 +2185,7 @@ function renderSelectedPane(): void {
       <div class="axis-pill is-${xStatus?.status ?? "under"}">x: ${xStatus?.usedKinds.length ?? 0}/2</div>
       <div class="axis-pill is-${yStatus?.status ?? "under"}">y: ${yStatus?.usedKinds.length ?? 0}/2</div>
     </div>
+    ${renderReferenceSetter(selected.id)}
     <div class="constraint-editor">
       ${renderAxisEditor(selected.id, "x")}
       ${renderAxisEditor(selected.id, "y")}
@@ -2187,6 +2194,100 @@ function renderSelectedPane(): void {
 
 bindSelectedInputs();
   bindConstraintEditors(selected.id);
+}
+
+function renderReferenceSetter(componentId: string): string {
+  const options = buildReferenceTargetOptions(componentId);
+  if (options.length <= 2) return "";
+  const expanded = referencePickerOpenFor === componentId;
+
+  return `
+    <div class="reference-picker">
+      <button id="toggle-reference-picker" class="reference-picker-toggle" type="button" aria-expanded="${expanded ? "true" : "false"}">
+        Set Reference
+      </button>
+      <div class="reference-picker-popover" ${expanded ? "" : "hidden"}>
+        <label class="field">
+          <span>Target</span>
+          <select id="reference-target">
+            ${options.join("")}
+          </select>
+        </label>
+        <button id="apply-reference-target" type="button">Apply</button>
+        <p class="hint">Only position constraints change. Closest only considers targets whose projected range overlaps on the other axis; it prefers the nearest allowed positive offset, otherwise falls back to the matching anchor. Width, height, and ratio stay unchanged.</p>
+      </div>
+    </div>
+  `;
+}
+
+function buildReferenceTargetOptions(componentId: string): string[] {
+  const preferred = getPreferredReferenceTarget(componentId);
+  const options = [
+    `<option value="viewport" ${preferred === "viewport" ? "selected" : ""}>Global</option>`,
+    `<option value="closest" ${preferred === "closest" ? "selected" : ""}>Closest</option>`,
+  ];
+
+  for (const component of store.components) {
+    if (component.id === componentId) continue;
+    if (componentDependsOn(component.id, componentId)) continue;
+    options.push(`<option value="${component.id}" ${preferred === component.id ? "selected" : ""}>${component.name}</option>`);
+  }
+
+  return options;
+}
+
+function getPreferredReferenceTarget(componentId: string): string {
+  const active = getBulkReferenceConstraints(componentId);
+  const counts = new Map<string, number>();
+
+  for (const constraint of active) {
+    const key = constraint.sourceComponentId ?? "viewport";
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+
+  const preferred = Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0];
+  if (preferred) return preferred;
+
+  const component = store.spec.components[componentId];
+  return component?.parentId ?? "viewport";
+}
+
+function getReferenceTargetCandidates(componentId: string): Array<string | null> {
+  const candidates: Array<string | null> = [null];
+  for (const component of store.components) {
+    if (component.id === componentId) continue;
+    if (componentDependsOn(component.id, componentId)) continue;
+    candidates.push(component.id);
+  }
+  return candidates;
+}
+
+function overlapsOnAxis(aStart: number, aEnd: number, bStart: number, bEnd: number): boolean {
+  return Math.max(aStart, bStart) <= Math.min(aEnd, bEnd);
+}
+
+function canUseTargetForClosest(componentId: string, constraint: ConstraintSpec, sourceComponentId: string | null): boolean {
+  if (sourceComponentId === null) return true;
+
+  const component = store.spec.components[componentId];
+  const target = store.spec.components[sourceComponentId];
+  if (!component || !target) return false;
+
+  if (constraint.axis === "x") {
+    return overlapsOnAxis(
+      component.box.y,
+      component.box.y + component.box.height,
+      target.box.y,
+      target.box.y + target.box.height,
+    );
+  }
+
+  return overlapsOnAxis(
+    component.box.x,
+    component.box.x + component.box.width,
+    target.box.x,
+    target.box.x + target.box.width,
+  );
 }
 
 function renderAxisEditor(componentId: string, axis: AxisKind): string {
@@ -2400,6 +2501,316 @@ function buildSourceOptions(componentId: string, selectedValue: string): string 
     .join("");
 }
 
+function getBulkReferenceConstraints(componentId: string): ConstraintSpec[] {
+  return store.spec.constraints.filter(
+    (constraint) => constraint.componentId === componentId && getBulkReferenceAnchor(constraint.kind) !== null,
+  );
+}
+
+function getBulkReferenceAnchor(kind: ConstraintKind): SourceAnchor | null {
+  if (kind === "left") return "left";
+  if (kind === "right") return "right";
+  if (kind === "centerX") return "centerX";
+  if (kind === "top") return "top";
+  if (kind === "bottom") return "bottom";
+  if (kind === "centerY") return "centerY";
+  return null;
+}
+
+function getBulkReferenceCandidateAnchors(kind: ConstraintKind): SourceAnchor[] {
+  if (kind === "left" || kind === "right") return ["left", "right"];
+  if (kind === "centerX") return ["left", "centerX", "right"];
+  if (kind === "top" || kind === "bottom") return ["top", "bottom"];
+  if (kind === "centerY") return ["top", "centerY", "bottom"];
+  return [];
+}
+
+function chooseReferenceCandidate(
+  componentId: string,
+  constraint: ConstraintSpec,
+  sourceComponentId: string | null,
+): { sourceAnchor: SourceAnchor; value: number; usedPositive: boolean } | null {
+  const candidateAnchors = getBulkReferenceCandidateAnchors(constraint.kind);
+  if (candidateAnchors.length === 0) return null;
+  if (wouldCreateRetargetCycle(constraint, sourceComponentId)) return null;
+
+  const fallbackAnchor = getBulkReferenceAnchor(constraint.kind) ?? candidateAnchors[0];
+  let fallbackMeasured: number | null = null;
+  let bestPositiveAnchor: SourceAnchor | null = null;
+  let bestPositiveMeasured: number | null = null;
+  let bestPositiveDistance: number | null = null;
+
+  for (const sourceAnchor of candidateAnchors) {
+    const measured = store.measureDraftConstraint({
+      componentId,
+      axis: constraint.axis,
+      kind: constraint.kind,
+      sourceComponentId,
+      sourceAnchor,
+      unit: constraint.unit,
+    });
+    if (measured === null || !Number.isFinite(measured)) continue;
+    const orientedMeasured = getConstraintOrientedValue(constraint.kind, measured);
+    if (sourceAnchor === fallbackAnchor) {
+      fallbackMeasured = measured;
+    }
+    if (orientedMeasured >= 0 && (bestPositiveDistance === null || orientedMeasured < bestPositiveDistance)) {
+      bestPositiveAnchor = sourceAnchor;
+      bestPositiveMeasured = measured;
+      bestPositiveDistance = orientedMeasured;
+    }
+  }
+
+  return {
+    sourceAnchor: bestPositiveAnchor ?? fallbackAnchor,
+    value: bestPositiveMeasured ?? fallbackMeasured ?? constraint.value,
+    usedPositive: bestPositiveAnchor !== null,
+  };
+}
+
+function syncReferenceDraft(componentId: string, axis: AxisKind, kind: ConstraintKind, sourceComponentId: string | null, sourceAnchor: SourceAnchor): void {
+  store.updateConstraintDraftReference(componentId, axis, kind, sourceComponentId, sourceAnchor);
+}
+
+function applyReferenceTargetToComponent(componentId: string, sourceComponentId: string | null): void {
+  const constraints = getBulkReferenceConstraints(componentId);
+  for (const constraint of constraints) {
+    const next = chooseReferenceCandidate(componentId, constraint, sourceComponentId);
+    if (!next) continue;
+
+    store.upsertConstraint({
+      componentId,
+      axis: constraint.axis,
+      kind: constraint.kind,
+      sourceComponentId,
+      sourceAnchor: next.sourceAnchor,
+      value: next.value,
+      unit: constraint.unit,
+      locked: constraint.locked,
+    });
+    syncReferenceDraft(componentId, constraint.axis, constraint.kind, sourceComponentId, next.sourceAnchor);
+  }
+
+  for (const axis of ["x", "y"] as const) {
+    for (const kind of getAvailableKinds(axis)) {
+      if (!isReferenceConstraintKind(kind)) continue;
+      const active = constraints.find((constraint) => constraint.axis === axis && constraint.kind === kind);
+      if (active) continue;
+      const anchor = getBulkReferenceAnchor(kind);
+      if (!anchor) continue;
+      syncReferenceDraft(componentId, axis, kind, sourceComponentId, anchor);
+    }
+  }
+}
+
+function applyClosestReferenceTarget(componentId: string): void {
+  const constraints = getBulkReferenceConstraints(componentId);
+  const candidates = getReferenceTargetCandidates(componentId);
+
+  for (const constraint of constraints) {
+    let bestSourceComponentId: string | null = null;
+    let bestAnchor: SourceAnchor | null = null;
+    let bestValue: number | null = null;
+    let bestUsedPositive = false;
+
+    for (const sourceComponentId of candidates) {
+      if (!canUseTargetForClosest(componentId, constraint, sourceComponentId)) continue;
+      const next = chooseReferenceCandidate(componentId, constraint, sourceComponentId);
+      if (!next) continue;
+
+      const shouldReplace =
+        bestAnchor === null ||
+        (next.usedPositive && !bestUsedPositive) ||
+        (next.usedPositive === bestUsedPositive &&
+          (bestValue === null || Math.abs(next.value) < Math.abs(bestValue)));
+
+      if (shouldReplace) {
+        bestSourceComponentId = sourceComponentId;
+        bestAnchor = next.sourceAnchor;
+        bestValue = next.value;
+        bestUsedPositive = next.usedPositive;
+      }
+    }
+
+    if (!bestUsedPositive) {
+      const viewportFallback = chooseReferenceCandidate(componentId, constraint, null);
+      if (viewportFallback) {
+        bestSourceComponentId = null;
+        bestAnchor = viewportFallback.sourceAnchor;
+        bestValue = viewportFallback.value;
+      }
+    }
+
+    if (bestAnchor === null || bestValue === null) continue;
+
+    store.upsertConstraint({
+      componentId,
+      axis: constraint.axis,
+      kind: constraint.kind,
+      sourceComponentId: bestSourceComponentId,
+      sourceAnchor: bestAnchor,
+      value: bestValue,
+      unit: constraint.unit,
+      locked: constraint.locked,
+    });
+    syncReferenceDraft(componentId, constraint.axis, constraint.kind, bestSourceComponentId, bestAnchor);
+  }
+
+  for (const axis of ["x", "y"] as const) {
+    for (const kind of getAvailableKinds(axis)) {
+      if (!isReferenceConstraintKind(kind)) continue;
+      const active = constraints.find((constraint) => constraint.axis === axis && constraint.kind === kind);
+      if (active) continue;
+
+      const probe: ConstraintSpec = {
+        id: "draft",
+        componentId,
+        axis,
+        kind,
+        sourceComponentId: null,
+        sourceAnchor: getDefaultAnchor(axis, kind),
+        value: 0,
+        unit: "px",
+      };
+      let bestSourceComponentId: string | null = null;
+      let bestAnchor: SourceAnchor | null = null;
+      let bestValue: number | null = null;
+      let bestUsedPositive = false;
+
+      for (const sourceComponentId of getReferenceTargetCandidates(componentId)) {
+        if (!canUseTargetForClosest(componentId, probe, sourceComponentId)) continue;
+        const next = chooseReferenceCandidate(componentId, probe, sourceComponentId);
+        if (!next) continue;
+        const shouldReplace =
+          bestAnchor === null ||
+          (next.usedPositive && !bestUsedPositive) ||
+          (next.usedPositive === bestUsedPositive &&
+            (bestValue === null || Math.abs(next.value) < Math.abs(bestValue)));
+
+        if (shouldReplace) {
+          bestSourceComponentId = sourceComponentId;
+          bestAnchor = next.sourceAnchor;
+          bestValue = next.value;
+          bestUsedPositive = next.usedPositive;
+        }
+      }
+
+      if (!bestUsedPositive) {
+        const viewportFallback = chooseReferenceCandidate(componentId, probe, null);
+        if (viewportFallback) {
+          bestSourceComponentId = null;
+          bestAnchor = viewportFallback.sourceAnchor;
+        }
+      }
+
+      if (bestAnchor) {
+        syncReferenceDraft(componentId, axis, kind, bestSourceComponentId, bestAnchor);
+      }
+    }
+  }
+}
+
+function isReferenceConstraintKind(kind: ConstraintKind): boolean {
+  return (
+    kind === "left" ||
+    kind === "right" ||
+    kind === "centerX" ||
+    kind === "top" ||
+    kind === "bottom" ||
+    kind === "centerY"
+  );
+}
+
+function activateConstraintWithDraftFallback(componentId: string, axis: AxisKind, kind: ConstraintKind): void {
+  if (!isReferenceConstraintKind(kind)) {
+    store.activateConstraint(componentId, axis, kind);
+    return;
+  }
+
+  const draft = store.getConstraintDraft(componentId, axis, kind);
+  if (
+    draft &&
+    !wouldCreateRetargetCycle(
+      {
+        id: "draft",
+        componentId,
+        axis,
+        kind,
+        sourceComponentId: draft.sourceComponentId,
+        sourceAnchor: draft.sourceAnchor,
+        value: draft.value,
+        unit: draft.unit,
+      },
+      draft.sourceComponentId,
+    )
+  ) {
+    store.activateConstraint(componentId, axis, kind);
+    return;
+  }
+
+  const constraint: ConstraintSpec = {
+    id: "draft",
+    componentId,
+    axis,
+    kind,
+    sourceComponentId: null,
+    sourceAnchor: getDefaultAnchor(axis, kind),
+    value: 0,
+    unit: "px",
+    locked: draft?.locked ?? false,
+  };
+
+  const candidates = getReferenceTargetCandidates(componentId);
+  let bestSourceComponentId: string | null = null;
+  let bestAnchor: SourceAnchor | null = null;
+  let bestValue: number | null = null;
+  let bestUsedPositive = false;
+
+  for (const sourceComponentId of candidates) {
+    if (!canUseTargetForClosest(componentId, constraint, sourceComponentId)) continue;
+    const next = chooseReferenceCandidate(componentId, constraint, sourceComponentId);
+    if (!next) continue;
+
+    const shouldReplace =
+      bestAnchor === null ||
+      (next.usedPositive && !bestUsedPositive) ||
+      (next.usedPositive === bestUsedPositive &&
+        (bestValue === null || Math.abs(next.value) < Math.abs(bestValue)));
+
+    if (shouldReplace) {
+      bestSourceComponentId = sourceComponentId;
+      bestAnchor = next.sourceAnchor;
+      bestValue = next.value;
+      bestUsedPositive = next.usedPositive;
+    }
+  }
+
+  if (!bestUsedPositive) {
+    const viewportFallback = chooseReferenceCandidate(componentId, constraint, null);
+    if (viewportFallback) {
+      bestSourceComponentId = null;
+      bestAnchor = viewportFallback.sourceAnchor;
+      bestValue = viewportFallback.value;
+    }
+  }
+
+  if (bestAnchor === null || bestValue === null) {
+    store.activateConstraint(componentId, axis, kind);
+    return;
+  }
+
+  store.upsertConstraint({
+    componentId,
+    axis,
+    kind,
+    sourceComponentId: bestSourceComponentId,
+    sourceAnchor: bestAnchor,
+    value: bestValue,
+    unit: "px",
+    locked: draft?.locked ?? false,
+  });
+}
+
 function getAnchorOptions(axis: AxisKind, kind: ConstraintKind, isViewport: boolean): SourceAnchor[] {
   if (kind === "ratio") return ["ratio"];
   if (isViewport) return axis === "x" ? ["left", "right", "centerX"] : ["top", "bottom", "centerY"];
@@ -2419,6 +2830,30 @@ function bindSelectedInputs(): void {
     renderComponentList();
     syncExportState();
   });
+
+  const toggleReferenceTargetButton = selectedPane.querySelector<HTMLButtonElement>("#toggle-reference-picker");
+  const applyReferenceTargetButton = selectedPane.querySelector<HTMLButtonElement>("#apply-reference-target");
+  const referenceTargetSelect = selectedPane.querySelector<HTMLSelectElement>("#reference-target");
+  if (toggleReferenceTargetButton && store.selectedId) {
+    toggleReferenceTargetButton.addEventListener("click", () => {
+      referencePickerOpenFor = referencePickerOpenFor === store.selectedId ? null : store.selectedId;
+      renderSelectedPane();
+    });
+  }
+  if (applyReferenceTargetButton && referenceTargetSelect && store.selectedId) {
+    applyReferenceTargetButton.addEventListener("click", () => {
+      if (referenceTargetSelect.value === "closest") {
+        applyClosestReferenceTarget(store.selectedId as string);
+      } else {
+        applyReferenceTargetToComponent(
+          store.selectedId as string,
+          referenceTargetSelect.value === "viewport" ? null : referenceTargetSelect.value,
+        );
+      }
+      referencePickerOpenFor = null;
+      render();
+    });
+  }
 
 }
 
@@ -2440,7 +2875,7 @@ function bindConstraintEditors(componentId: string): void {
       const kind = checkbox.dataset.kind as ConstraintKind;
       const methodKey = getMethodKey(componentId, axis, kind);
       if (checkbox.checked) {
-        store.activateConstraint(componentId, axis, kind);
+        activateConstraintWithDraftFallback(componentId, axis, kind);
         expandedMethodKey = methodKey;
       } else {
         store.removeConstraintByKind(componentId, axis, kind);

@@ -277,6 +277,25 @@ export class EditorStore {
     return this.constraintDrafts.get(getConstraintKey(componentId, axis, kind)) ?? null;
   }
 
+  public updateConstraintDraftReference(
+    componentId: string,
+    axis: AxisKind,
+    kind: ConstraintKind,
+    sourceComponentId: string | null,
+    sourceAnchor: SourceAnchor,
+  ): void {
+    const key = getConstraintKey(componentId, axis, kind);
+    const existing = this.constraintDrafts.get(key) ?? this.createDefaultDraft(componentId, axis, kind);
+    this.constraintDrafts.set(key, {
+      ...existing,
+      componentId,
+      axis,
+      kind,
+      sourceComponentId,
+      sourceAnchor,
+    });
+  }
+
   public updateConstraintLock(componentId: string, axis: AxisKind, kind: ConstraintKind, locked: boolean): void {
     const active = this.spec.constraints.find(
       (constraint) =>
